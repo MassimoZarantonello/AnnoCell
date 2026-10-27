@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
+import pytest
 
 from annocell import folder as af
+from conftest import write_folder
 
 
 def test_reads_what_the_pipeline_wrote(train_folder):
@@ -60,3 +64,42 @@ def test_save_writes_masks_cells_and_review(train_folder):
 def test_image_folders_lists_folders_with_a_record(train_folder):
     (train_folder.parent / "not_an_image").mkdir()
     assert af.image_folders(train_folder.parent) == [train_folder]
+
+
+def test_rois_walks_the_tree(train_folder, test_folder, tmp_path):
+    (tmp_path / "alice" / "notes").mkdir()  # not a round: left out
+    write_folder(af.round_folder(tmp_path, "alice", 10) / "roi_b")
+    write_folder(af.round_folder(tmp_path, "bob", 2) / "roi_a")
+    found = [(r.annotator, r.round, r.name) for r in af.rois(tmp_path)]
+    assert found == [
+        ("alice", 2, "test_image"),
+        ("alice", 10, "roi_b"),  # by round number, not by name
+        ("bob", 2, "roi_a"),
+        ("carla", None, "patch_y500_x500"),
+    ]
+    assert af.rois(tmp_path)[0].folder == train_folder
+    assert af.read_record(train_folder)["annotator"] == "alice"
+
+
+def test_annotator_names_are_checked(tmp_path):
+    assert af.round_folder(tmp_path, "anne-2", 3) == tmp_path / "anne-2" / "round_03"
+    for name in ("Alice", "alice smith", "", "../bob"):
+        with pytest.raises(ValueError):
+            af.check_annotator(name)
+
+
+def test_complete_and_closed(train_folder):
+    record = af.read_record(train_folder)
+    assert not af.is_complete(record) and not af.is_closed(record)  # never opened: no review yet
+    masks = af.read_start(train_folder)
+    cells = af.sync_cells({}, masks, masks)
+    af.save(train_folder, masks, cells)
+    assert not af.is_complete(af.read_record(train_folder))  # every cell still unreviewed
+    for cell in cells.values():
+        cell.state = af.OK
+    af.save(train_folder, masks, cells)
+    assert af.is_complete(af.read_record(train_folder))
+    af.close(train_folder, date(2026, 11, 2))
+    record = af.read_record(train_folder)
+    assert af.is_closed(record) and record["closed_on"] == "2026-11-02"
+    assert af.is_complete(record)  # closing keeps the review

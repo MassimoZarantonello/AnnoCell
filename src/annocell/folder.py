@@ -1,7 +1,13 @@
 """The round folder: everything the annotation tool reads and writes, with numpy and tifffile only.
 
-One folder per image (``<root>/round_<NN>/<image>/`` for training images, ``<root>/test/<patch>/`` for test
-patches), self-contained so that it can be copied to the annotator's laptop:
+The tree: one folder per annotator, the only one they open, holding their rounds and test regions:
+
+- ``<root>/<annotator>/round_<NN>/<roi>/``: an ROI given to that annotator in round ``NN`` (``round_folder``);
+- ``<root>/<annotator>/test/<roi>/``: a test region, drawn from scratch (``test_regions_folder``).
+
+``rois`` lists them. Annotator names are lowercase letters, digits and ``-`` (``check_annotator``).
+
+One folder per image (an ROI), self-contained so that it can be copied to the annotator's laptop:
 
 - ``image.tif``: every channel of the crop, (channels, y, x); the names are in ``annotation.json`` (``channels``);
 - ``start_masks.tif``: the proposed masks as given to the annotator; absent in test mode (start from empty);
@@ -14,6 +20,14 @@ patches), self-contained so that it can be copied to the annotator's laptop:
 - ``annotation.json``: where it all comes from (written by the exporting pipeline, e.g. macroseg), plus the review
   summary; ``format_version`` is the version of this layout (``FORMAT_VERSION``).
 
+``annotation.json`` fields the tool and overviews read (all optional except ``format_version``):
+
+- written at export: ``annotator``, ``round`` (absent for a test region), ``image``, ``mode`` (``train`` /
+  ``test``), ``source`` (the slide) and ``region`` (``[y0, y1, x0, x1]`` in slide pixels), ``exported_on``,
+  ``channels``, ``visible_channels``, ``colours``, ``start_segmentation``, ``compare``;
+- written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only;
+- written by the tool at every save: ``review`` (``summary`` and ``saved_at``); ``is_complete`` reads it.
+
 Files are written to a temporary name and renamed, so a crash during a save never leaves a broken file.
 """
 
@@ -22,9 +36,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +54,10 @@ MASKS = "masks.tif"
 CELLS = "cells.csv"
 RECORD = "annotation.json"
 COMPARE = "compare"
+# Folder names in the tree, under an annotator's folder.
+ROUND = "round_{:02d}"
+TEST = "test"
+ANNOTATOR = re.compile(r"[a-z0-9-]+")  # a folder name on Mac and Windows alike
 
 # Review state of a cell (``state``), and where its outline comes from (``origin``).
 UNREVIEWED, OK = "unreviewed", "ok"
@@ -66,6 +85,76 @@ def write_record(folder: str | Path, record: Mapping) -> None:
 def is_test(record: Mapping) -> bool:
     """Test mode: drawn from scratch, no proposal and no comparison layers."""
     return record.get("mode") == "test"
+
+
+def is_complete(record: Mapping) -> bool:
+    """Every cell checked (at least one cell, none unreviewed) at the last save: what training takes.
+
+    For a test region (drawn from scratch, every drawn cell OK) it only says that cells were drawn, not that the
+    drawing is finished.
+    """
+    review = record.get("review") or {}
+    return review.get("cells", 0) > 0 and review.get(UNREVIEWED, 1) == 0
+
+
+def close(folder: str | Path, on: date | None = None) -> None:
+    """The round of this ROI is over: ``closed_on`` (default today); the tool then opens the ROI read-only."""
+    record = read_record(folder)
+    record["closed_on"] = (on or date.today()).isoformat()
+    write_record(folder, record)
+
+
+def is_closed(record: Mapping) -> bool:
+    return bool(record.get("closed_on"))
+
+
+# The tree
+
+
+def check_annotator(name: str) -> str:
+    """``name`` if it is a valid annotator name (lowercase letters, digits and ``-``), else a ValueError."""
+    if not ANNOTATOR.fullmatch(name):
+        raise ValueError(f"Annotator name {name!r}: use lowercase letters, digits and '-' only (e.g. 'alice').")
+    return name
+
+
+def round_folder(root: str | Path, annotator: str, round_number: int) -> Path:
+    """``<root>/<annotator>/round_<NN>``: the ROIs of round ``round_number`` given to ``annotator``."""
+    return Path(root) / check_annotator(annotator) / ROUND.format(round_number)
+
+
+def test_regions_folder(root: str | Path, annotator: str) -> Path:
+    """``<root>/<annotator>/test``: the test regions ``annotator`` draws from scratch."""
+    return Path(root) / check_annotator(annotator) / TEST
+
+
+@dataclass(frozen=True)
+class Roi:
+    """An ROI folder of the tree; ``round`` is None for a test region."""
+
+    folder: Path
+    annotator: str
+    round: int | None
+
+    @property
+    def name(self) -> str:
+        return self.folder.name
+
+
+def rois(root: str | Path) -> list[Roi]:
+    """Every ROI folder under ``root``, by annotator, then round (test regions last), then name.
+
+    Annotator and round are read from the folder names; other folders (not an annotator name, not ``round_<NN>`` or
+    ``test``) are left out.
+    """
+    found = []
+    for path in Path(root).glob(f"*/*/*/{RECORD}"):
+        folder = path.parent
+        annotator, group = folder.parent.parent.name, folder.parent.name
+        number = re.fullmatch(r"round_(\d+)", group)
+        if ANNOTATOR.fullmatch(annotator) and (number or group == TEST):
+            found.append(Roi(folder, annotator, int(number[1]) if number else None))
+    return sorted(found, key=lambda r: (r.annotator, r.round is None, r.round or 0, r.name))
 
 
 def read_image(folder: str | Path) -> tuple[np.ndarray, list[str]]:

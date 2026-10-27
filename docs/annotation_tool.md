@@ -17,7 +17,7 @@ export_test(sdata, cfg, [y0, y1, x0, x1], root)  # a test patch, drawn from scra
 The annotator opens a round (or test) folder, or a single image folder:
 
 ```bash
-annocell <root>/round_02
+annocell <root>/alice/round_02
 ```
 
 Or `annocell` alone: napari opens with an empty panel, and its **Open folder** button picks a round, test or image
@@ -38,7 +38,7 @@ brush and eraser were tried and dropped.)
 
 ## Users and setting
 
-- One annotator at a time, a biologist (not a programmer).
+- Biologists (not programmers), several, each with their own ROIs in their own folder: one annotator per ROI.
 - Runs **locally** on the annotator's computer, **Mac or Windows** (unknown in advance): nothing OS-specific,
   shortcuts documented as Ctrl / Cmd.
 - No training, no GPU needed in the tool.
@@ -98,10 +98,15 @@ crash loses little; undo / redo as in napari.
 
 ## Data
 
-One folder per image and round, as today (`$MACROSEG_ANNOTATIONS/round_<NN>/<image>/`). The folder is
-**self-contained**: the annotator's laptop has no stores, so the export copies everything the tool shows, and the
-tool needs only napari, tifffile and numpy (no spatialdata, Harpy or Cellpose). A 1024 x 1024, 6-channel uint16
-crop is 12 MB; a mask is 4 MB.
+One folder per annotator, the only one they open, with their rounds and test regions inside:
+`<root>/<annotator>/round_<NN>/<roi>/` and `<root>/<annotator>/test/<roi>/` (`annocell.folder.rois` lists them;
+annotator names are lowercase letters, digits and `-`). Annotator first, so that nobody has to pick their round
+among everyone's. When a round is over, the pipeline closes its ROIs (`closed_on`, `annocell.folder.close`).
+Overviews (AnnOverview) read the tree and never write to it.
+
+One folder per ROI, **self-contained**: the annotator's laptop has no stores, so the export copies everything the
+tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, Harpy or Cellpose). A 1024 x 1024,
+6-channel uint16 crop is 12 MB; a mask is 4 MB.
 
 - `image.tif`: every channel of the crop, with the channel names;
 - `start_masks.tif`: the proposed masks as given to the annotator (to count corrections); absent in test mode;
@@ -111,8 +116,8 @@ crop is 12 MB; a mask is 4 MB.
   used and `_seg.npy` is a pickle. `corrected_masks()` keeps reading `_seg.npy` for round 1;
 - `cells.csv`: one row per cell: `cell_ID`, `state` (`unreviewed` / `ok`), `origin` (`proposed` / `edited` /
   `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `macrophage` (test mode only);
-- `annotation.json`: as today (round, role, provenance, start segmentation, counts, start score), plus the
-  review summary (cells OK / unreviewed).
+- `annotation.json`: as today (annotator, round, role, provenance, start segmentation, counts, start score),
+  `closed_on` when the round is over, plus the review summary (cells OK / unreviewed).
 
 Saves write a temporary file and rename it, so a crash during a save cannot corrupt the masks.
 
@@ -164,7 +169,8 @@ Drawn once and then fixed.
 
 - Training or segmenting from the GUI.
 - Per-cell confidence (needs the segmentation step to save Cellpose's probability map).
-- Several annotators, locking, annotator identity, time per image.
+- Several annotators on the same ROI (blending them is the pipeline's: macroseg `docs/concurrent_annotations.md`),
+  locking, time per image (planned as sessions per ROI, AnnOverview `docs/design.md`).
 - Classification of cells (macrophage / other): a later phase (except the macrophage flag of test mode).
 
 ## Packaging and installation

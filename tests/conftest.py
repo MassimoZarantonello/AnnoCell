@@ -26,9 +26,11 @@ def start_masks() -> np.ndarray:
 
 
 def write_folder(folder: Path, test: bool = False, colours: dict | None = None) -> Path:
-    """A training image (proposal + one comparison layer), or a test image drawn from scratch (``test``)."""
+    """A training image (proposal + one comparison layer), or a test image drawn from scratch (``test``), in
+    ``<root>/<annotator>/<round_NN or test>/<roi>/``."""
     af.write_image(folder, image())
     record = {
+        "annotator": folder.parent.parent.name,
         "image": folder.name,
         "format_version": af.FORMAT_VERSION,
         "mode": "test" if test else "train",
@@ -37,6 +39,7 @@ def write_folder(folder: Path, test: bool = False, colours: dict | None = None) 
         "colours": colours or {},
     }
     if not test:
+        record["round"] = int(folder.parent.name.removeprefix("round_"))
         af.write_masks(folder, start_masks(), af.START)
         compare = np.zeros((20, 30), dtype=np.uint32)
         compare[0:10, 0:20] = 1
@@ -49,9 +52,11 @@ def write_folder(folder: Path, test: bool = False, colours: dict | None = None) 
 
 @pytest.fixture
 def train_folder(tmp_path) -> Path:
-    return write_folder(tmp_path / "round_02" / "test_image")
+    return write_folder(af.round_folder(tmp_path, "alice", 2) / "test_image")
 
 
 @pytest.fixture
 def test_folder(tmp_path) -> Path:
-    return write_folder(tmp_path / "test" / "patch_y500_x500", test=True, colours={"DAPI": "blue"})
+    return write_folder(
+        af.test_regions_folder(tmp_path, "carla") / "patch_y500_x500", test=True, colours={"DAPI": "blue"}
+    )
