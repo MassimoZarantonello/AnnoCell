@@ -10,18 +10,22 @@ finishing a round); the tool itself only needs a folder in the AnnoCell layout.
 Massimo exports, in Python, from macroseg (`macroseg.annotation`):
 
 ```python
-export_round(sdata, cfg, "membrane_dapi", root, round_number=2, compare=["exp201_test_crop_r01"], models_root=models)
-export_test(sdata, cfg, [y0, y1, x0, x1], root)  # a test patch, drawn from scratch
+export_round(sdata, cfg, "membrane_dapi", root, 2, "alice", compare=["exp201_test_crop_r01"], models_root=models)
+export_test(sdata, cfg, [y0, y1, x0, x1], root, "carla")  # a test region, drawn from scratch
+close_round(root, 2)  # the round is over: its ROIs become read-only
 ```
 
-The annotator opens a round (or test) folder, or a single image folder:
+(The pipeline is now AnnoLoop, which started as a copy of macroseg.)
+
+The annotator opens their own folder; the tool opens their latest round that is not closed (else their test
+regions, else their latest round, read-only):
 
 ```bash
-annocell <root>/alice/round_02
+annocell <root>/alice
 ```
 
-Or `annocell` alone: napari opens with an empty panel, and its **Open folder** button picks a round, test or image
-folder in the system's folder picker. napari's own File → Open is not used: it would open the files as plain layers,
+A round folder or a single image folder opens too. Or `annocell` alone: napari opens with an empty panel, and its
+**Open folder** button picks the folder in the system's folder picker. napari's own File → Open is not used: it would open the files as plain layers,
 outside the tool.
 
 When the folders are back, `finish(folder)` records the changes (complete = no cell left unreviewed).
@@ -57,7 +61,7 @@ brush and eraser were tried and dropped.)
    all the time they confused more than they helped. They are the masks of earlier segmentations and models of the
    same image, copied into the folder at export, to see the changes from model to model. Each is labelled with
    whether that model was **trained on this image** (then its improvement there does not count).
-4. **The side panel**: image and counts, a legend of the colours, the two bulk buttons (all in view OK, go to an
+4. **The side panel**: image, annotator and round (a mix-up of folders shows there), counts, a legend of the colours, the two bulk buttons (all in view OK, go to an
    unreviewed cell), previous / next image, the comparison checkbox, and the mouse and keys. The modes have no
    buttons: they are keys (`N`, `D`), and the panel shows the current one.
 
@@ -95,6 +99,16 @@ not sure about the outline: keep the proposal*.
 
 Saving is automatic (every 3 seconds when something changed, when changing image and when closing napari), so a
 crash loses little; undo / redo as in napari.
+
+**Network drive.** The folders are on a network drive (fs4), reached through the VPN from home, so a save can fail
+(drive or VPN down). Then everything stays in memory, the panel says "Not saved", the next autosave tries again,
+and the tool does not change image until it has saved. If it still cannot save when napari closes, it writes a copy
+to `AnnoCell unsaved` in the home folder and says so. Saves write a temporary file and rename it, so a dropped
+connection never leaves half a file.
+
+**Closed rounds.** An ROI whose round is over (`closed_on`, written by the pipeline) opens **read-only**: no editing
+mode, no drawing, no marking, never saved; the panel says "Round N closed: read-only". Its masks were already used
+for training: changing them afterwards would make that training impossible to reproduce.
 
 ## Data
 

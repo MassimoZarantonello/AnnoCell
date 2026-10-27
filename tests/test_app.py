@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -214,3 +215,82 @@ def test_starts_empty_and_opens_a_folder(train_folder, test_folder, tmp_path):
         assert tool.folder == test_folder and tool.test_mode
     finally:
         viewer.close()
+
+
+def test_annotator_folder_opens_the_latest_open_round(tmp_path):
+    from annocell.app import folders_to_open
+    from conftest import write_folder
+
+    alice = tmp_path / "alice"
+    for round_number, name in ((1, "a"), (2, "b"), (2, "c"), (10, "d")):
+        write_folder(af.round_folder(tmp_path, "alice", round_number) / name)
+    af.close(alice / "round_01" / "a")
+    af.close(alice / "round_10" / "d")
+    folders, index = folders_to_open(alice)  # round 10 is closed: round 2, its first image with cells to check
+    assert [f.name for f in folders] == ["b", "c"] and index == 0
+    af.close(alice / "round_02" / "b")
+    af.close(alice / "round_02" / "c")
+    assert folders_to_open(alice)[0] == [alice / "round_10" / "d"]  # all closed: the latest round, read-only
+    carla = write_folder(af.test_regions_folder(tmp_path, "carla") / "patch", test=True)
+    assert folders_to_open(tmp_path / "carla")[0] == [carla]  # only test regions
+    with pytest.raises(FileNotFoundError, match="your own folder"):
+        folders_to_open(tmp_path)  # the shared root: several annotators, nothing to pick
+
+
+def test_closed_roi_is_read_only(train_folder):
+    from annocell.app import DELETE, NAVIGATE, Annotator
+
+    af.close(train_folder)
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        assert tool.read_only and not tool.masks.editable
+        assert "alice, round 2" in _panel(tool) and "Round 2 closed: read-only" in _panel(tool)
+        tool.toggle_mode(DELETE)
+        assert tool.mode == NAVIGATE  # no editing mode
+        _click(tool, viewer, 2, (5, 5))  # no outline
+        assert tool.drawing is None
+        viewer.reset_view()
+        tool.all_in_view_ok()
+        assert all(c.state == af.UNREVIEWED for c in tool.cells.values())
+        assert tool.save() and not (train_folder / af.MASKS).exists()  # never written
+    finally:
+        viewer.close()
+
+
+def test_failed_save_keeps_the_changes_and_tries_again(train_folder, test_folder, tmp_path, monkeypatch):
+    from annocell.app import TOGGLE, Annotator
+
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder, test_folder], 0)
+        tool.toggle_mode(TOGGLE)
+        _click(tool, viewer, 1, (5, 5))  # cell 1 OK
+        save = af.save
+
+        def unreachable(folder, *args):  # the image folder's drive is down; the home folder is fine
+            if Path(folder) == train_folder:
+                raise OSError("network drive unreachable")
+            save(folder, *args)
+
+        monkeypatch.setattr(af, "save", unreachable)
+        assert not tool.save() and tool.dirty and "Not saved" in _panel(tool)
+        tool.go(1)  # not saved: the image stays open
+        assert tool.folder == train_folder and tool.cells[1].state == af.OK
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        backup = tool.save_backup()  # what closing napari does when the drive is still unreachable
+        assert backup == tmp_path / "home" / "AnnoCell unsaved" / "alice_round_02_test_image"
+        monkeypatch.setattr(af, "save", save)
+        assert af.read_cells(backup)[1].state == af.OK
+        tool.autosave()  # the drive is back
+        assert not tool.dirty and tool.save_error is None and "Not saved" not in _panel(tool)
+        assert af.read_cells(train_folder)[1].state == af.OK
+    finally:
+        viewer.close()
+
+
+def _panel(tool) -> str:
+    """Every text of the side panel."""
+    from qtpy.QtWidgets import QLabel
+
+    return " ".join(label.text() for label in tool.widget.findChildren(QLabel))

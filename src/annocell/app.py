@@ -1,8 +1,9 @@
 """The napari annotation tool: ``annocell <folder>``.
 
-``<folder>`` is one image folder, or a round (or test) folder holding several; the tool opens the first image
-with cells left to review and moves through the others with Previous / Next. Without ``<folder>`` it opens empty,
-and the panel's "Open folder" button picks one.
+``<folder>`` is the annotator's own folder (the tool opens their latest round that is not closed), a round (or
+test) folder, or one image folder; the tool opens the first image with cells left to review and moves through the
+others of the same round with Previous / Next. Without ``<folder>`` it opens empty, and the panel's "Open folder"
+button picks one. An ROI of a closed round (``closed_on``) opens read-only: it can be looked at, not changed.
 
 Layers: every channel of the image (napari's own controls) and the editable masks (``masks (from <segmentation>)``),
 outlined in yellow (unreviewed) or green (OK); in test mode, magenta marks macrophages. Read-only comparison masks
@@ -28,7 +29,10 @@ Keys on the cell under the mouse:
 napari's own editing tools (brush, eraser, fill, polygon, picker) are hidden and switched off: a wrong outline is
 deleted and drawn again.
 
-The masks are saved every few seconds, when changing image and when closing napari.
+The masks are saved every few seconds, when changing image and when closing napari. The folders may be on a
+network drive: a save that fails (drive unreachable) keeps everything in memory, says so in the panel, and is tried
+again at the next autosave; the tool does not change image until it has saved. If it still fails when napari closes,
+a copy goes to ``AnnoCell unsaved`` in the home folder.
 
 How it fits together: ``Annotator`` holds the state (current image, masks layer, cell table) and reacts to napari's
 mouse, key and paint events; ``_Widget`` is the side panel; ``annocell.folder`` reads and writes the files.
@@ -69,7 +73,9 @@ class Annotator:
     - ``snapshot``: the masks after the last handled edit, to find what the next edit changed;
     - ``saved``: the masks as last written to disk, and ``dirty``: a review state changed since then;
     - ``next_id``: the ID of the next drawn cell, never reusing an ID of the start masks;
-    - ``mode``: navigate, draw or delete; ``drawing``: the outline being drawn, or None.
+    - ``mode``: navigate, draw, delete or OK; ``drawing``: the outline being drawn, or None;
+    - ``read_only``: the ROI's round is closed: nothing can be changed or saved;
+    - ``save_error``: why the last save failed (e.g. the network drive unreachable), or None.
 
     With no folder open (``folders`` empty), ``masks`` is None and the keys, buttons, mouse and autosave do nothing.
     """
@@ -81,6 +87,7 @@ class Annotator:
         self.folders = list(folders or [])
         self.masks = None  # no image open yet
         self.folder, self.index, self.cells, self.test_mode = None, 0, {}, False
+        self.record, self.read_only, self.save_error = {}, False, None
         self.mode = NAVIGATE
         self.drawing = None  # the outline being drawn, (y, x) points
         self.show_compare = False  # kept when moving to the next image
@@ -113,8 +120,9 @@ class Annotator:
 
             show_error(str(error))
             return
-        if self.is_open:
-            self.save()
+        if self.is_open and not self.save():
+            _cannot_leave()
+            return
         self.folders = folders
         self.load(index)
 
@@ -128,6 +136,7 @@ class Annotator:
         self.folder = self.folders[index]
         self.record = af.read_record(self.folder)
         self.test_mode = af.is_test(self.record)
+        self.read_only = af.is_closed(self.record)
         image, names = af.read_image(self.folder)
         shape = image.shape[1:]
         self.start = af.read_start(self.folder, shape)
@@ -155,6 +164,7 @@ class Annotator:
         source = (self.record.get("start_segmentation") or {}).get("labels")
         name = "masks (from scratch)" if self.test_mode else f"masks (from {source})" if source else "masks"
         self.masks = self.viewer.add_labels(masks, name=name, opacity=1.0)
+        self.masks.editable = not self.read_only
         self.masks.contour = 1  # outlines only, so the channels stay visible inside the cells
         self.masks.show_selected_label = False
         # napari emits ``paint`` before writing the new pixels: look at them once the event is over.
@@ -175,9 +185,12 @@ class Annotator:
     def go(self, step: int) -> None:
         """Save, then open the previous (``-1``) or next (``1``) image; nothing past the first or last."""
         index = self.index + step
-        if self.is_open and 0 <= index < len(self.folders):
-            self.save()
-            self.load(index)
+        if not (self.is_open and 0 <= index < len(self.folders)):
+            return
+        if not self.save():
+            _cannot_leave()
+            return
+        self.load(index)
 
     def set_compare(self, show: bool) -> None:
         """Add the comparison masks to the layer list (hidden, below the masks), or remove them."""
@@ -203,7 +216,9 @@ class Annotator:
 
     def set_mode(self, mode: str) -> None:
         """``navigate`` (napari as usual), ``draw``, ``delete`` or ``toggle`` (OK); dragging pans in navigate and draw
-        (except while an outline is being drawn); in delete and OK it acts on the cells passed over."""
+        (except while an outline is being drawn); in delete and OK it acts on the cells passed over. A read-only ROI
+        stays in navigate."""
+        mode = NAVIGATE if self.read_only else mode
         self.cancel_outline()  # sets mouse_pan back to True: set it after
         self.masks.mouse_pan = mode not in (DELETE, TOGGLE)
         self.mode = mode
@@ -239,6 +254,8 @@ class Annotator:
         drawn, deletes (delete mode) or marks (OK mode) the cells pressed and dragged over."""
         # Buttons: 1 left, 2 right. Clicks on another layer (e.g. a channel being adjusted) are napari's.
         if not self.is_open or event.button not in (1, 2) or viewer.layers.selection.active is not self.masks:
+            return
+        if self.read_only:  # a closed round: look, do not touch (dragging still pans)
             return
         point = self._data_point(event.position)
         if self.drawing is not None:
@@ -361,6 +378,8 @@ class Annotator:
 
     def all_in_view_ok(self) -> None:
         """``Shift+O``: every cell entirely in view becomes OK (cells cut by the edge of the view are left)."""
+        if self.read_only:
+            return
         # ``corner_pixels``: the first and last visible pixel of the layer, (y, x), as napari last drew it.
         (y0, x0), (y1, x1) = np.asarray(self.masks.corner_pixels, dtype=int)[:, -2:]
         for cell in af.ids_inside(self.masks.data, y0, y1 + 1, x0, x1 + 1):
@@ -371,7 +390,7 @@ class Annotator:
     def toggle_macrophage(self) -> None:
         """``Shift+M``, test mode only: the cell under the mouse is a macrophage, or no longer."""
         cell = self.cell_under_cursor()
-        if self.test_mode and cell and cell in self.cells:
+        if self.test_mode and not self.read_only and cell and cell in self.cells:
             self.cells[cell].macrophage = not self.cells[cell].macrophage
             self.changed()
 
@@ -440,15 +459,43 @@ class Annotator:
         if self.dirty or not np.array_equal(data, self.saved):
             self.save()
 
-    def save(self) -> None:
-        """Write the masks, the cell table and the review summary of the current image (``folder.save``)."""
-        if not self.is_open:
-            return
+    def save(self) -> bool:
+        """Write the masks, the cell table and the review summary of the current image (``folder.save``); True if
+        written (or nothing to write: no image open, or a read-only ROI, which is never written).
+
+        If the write fails (e.g. the network drive is unreachable), everything stays in memory and ``dirty``, the
+        panel says so (one warning, not one per autosave), and the next autosave tries again; returns False.
+        """
+        from napari.utils.notifications import show_info, show_warning
+
+        if not self.is_open or self.read_only:
+            return True
         data = self.masks.data
         self.cells = af.sync_cells(self.cells, data, self.start)
-        af.save(self.folder, data, self.cells)
+        try:
+            af.save(self.folder, data, self.cells)
+        except OSError as error:
+            if self.save_error is None:
+                show_warning(f"Not saved ({error}). Your changes are kept; trying again every few seconds.")
+            self.save_error = str(error)
+            self.dirty = True
+            self.widget.update_status()
+            return False
+        if self.save_error is not None:
+            show_info("Saved again.")
+            self.save_error = None
         self.saved = data.copy()
         self.dirty = False
+        self.widget.update_status()
+        return True
+
+    def save_backup(self) -> Path:
+        """When the image folder cannot be written as napari closes: the masks, the cell table and the record go to
+        ``~/AnnoCell unsaved/<annotator>_<round>_<image>/``, to be copied back into the image folder."""
+        folder = Path.home() / "AnnoCell unsaved" / "_".join(self.folder.parts[-3:])
+        af.write_record(folder, self.record)
+        af.save(folder, self.masks.data, self.cells)
+        return folder
 
     def _bind_keys(self) -> None:
         """The tool's keys, on the viewer (they work whatever layer is selected; Esc is also bound on the masks
@@ -551,15 +598,25 @@ class _Widget:
                 status.setText("Open a round folder or an image folder.")
                 return
             counts = af.summary(annotator.cells)
-            kind = "test image (from scratch)" if annotator.test_mode else "correction"
+            record = annotator.record
+            kind = "test region (from scratch)" if annotator.test_mode else "correction"
+            # Whose image and which round: a mix-up of folders shows here.
+            where = "test" if annotator.test_mode else f"round {record['round']}" if "round" in record else ""
+            who = ", ".join(x for x in (record.get("annotator"), where) if x)
             title.setText(
-                f"<b>{annotator.folder.name}</b><br>image {annotator.index + 1} of {len(annotator.folders)}, {kind}"
+                f"<b>{annotator.folder.name}</b><br>{who + '<br>' if who else ''}"
+                f"image {annotator.index + 1} of {len(annotator.folders)}, {kind}"
             )
             text = f"{counts['cells']} cells: {counts[af.OK]} OK, {counts[af.UNREVIEWED]} not checked"
+            if annotator.read_only:
+                text = f"<b>{where.capitalize() or 'Round'} closed: read-only</b><br>{text}"
             if annotator.test_mode:
                 text += f"<br>{counts['macrophages']} macrophages"
             elif counts["cells"] and not counts[af.UNREVIEWED]:
                 text += "<br><b>Complete</b>"  # every cell checked: untouched cells now count as correct
+            if annotator.save_error is not None:
+                text += f"<br><b style='color:{_hex(COLOURS['macrophage'])}'>Not saved: folder unreachable.</b> "
+                text += "Your changes are kept; trying again every few seconds."
             status.setText(text)
 
         def update_mode():
@@ -569,7 +626,7 @@ class _Widget:
                 DELETE: "delete (D): click or drag over the cells to delete",
                 TOGGLE: "OK (O): click or drag over the cells to mark",
             }
-            mode.setText(f"Mode: <b>{names[annotator.mode]}</b>")
+            mode.setText(f"Mode: <b>{'read-only' if annotator.read_only else names[annotator.mode]}</b>")
             compare.setEnabled(not annotator.test_mode)
 
         widget.update_status = update_status
@@ -588,17 +645,25 @@ def _polygon_area(path: np.ndarray) -> float:
     return 0.5 * abs(float(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
 
 
+def _cannot_leave() -> None:
+    from napari.utils.notifications import show_error
+
+    show_error("Not saved: this image stays open until it can be saved (is the drive reachable?).")
+
+
 def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
     """The image folders to move through and the one to open first: ``path`` itself among its siblings, or the
-    first image of ``path`` (a round or test folder) with cells left to review."""
+    first image of ``path`` (a round or test folder, or the round an annotator's folder opens) with cells left to
+    review."""
     path = Path(path)
     single = (path / af.RECORD).exists()
-    # Folders made for the Cellpose GUI (macroseg's round 1) have no image.tif: the tool cannot open them.
+    if not single and not af.image_folders(path):
+        path = _group_to_open(path)  # an annotator's folder
     folders = [f for f in af.image_folders(path.parent if single else path) if (f / af.IMAGE).exists()]
     if single and path not in folders or not folders:
         raise FileNotFoundError(
-            f"No image to open in {path}: the tool opens folders in the AnnoCell layout (with {af.IMAGE}), "
-            f"e.g. written by macroseg's export_round or export_test; not folders made for the Cellpose GUI."
+            f"No image to open in {path}: open your own folder, a round folder or an image folder in the AnnoCell "
+            f"layout (with {af.IMAGE})."
         )
     if single:
         return folders, folders.index(path)
@@ -607,11 +672,25 @@ def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
     return folders, pending[0] if pending else 0
 
 
+def _group_to_open(folder: Path) -> Path:
+    """In an annotator's folder: the latest round with an image not closed, else the test regions, else the latest
+    round (read-only); ``folder`` itself if it holds none of them."""
+    closed = {}  # round or test folder: whether each of its images is closed
+    for record in folder.glob(f"*/*/{af.RECORD}"):
+        closed.setdefault(record.parent.parent, []).append(af.is_closed(af.read_record(record.parent)))
+    rounds = sorted(
+        (g for g in closed if g.name.removeprefix("round_").isdigit()), key=lambda g: int(g.name.removeprefix("round_"))
+    )
+    open_rounds = [g for g in rounds if not all(closed[g])]
+    test = folder / af.TEST
+    return open_rounds[-1] if open_rounds else test if test in closed else rounds[-1] if rounds else folder
+
+
 def main(argv: list[str] | None = None) -> None:
     """``annocell [<folder>]``: open the tool (empty without a folder) and save when napari closes."""
     parser = argparse.ArgumentParser(prog="annocell", description="Correct segmentations in napari.")
     parser.add_argument(
-        "folder", nargs="?", help="an image folder, or a round / test folder with several (default: choose in the tool)"
+        "folder", nargs="?", help="your own folder, a round folder or an image folder (default: choose in the tool)"
     )
     args = parser.parse_args(argv)
     folders, index = [], 0
@@ -625,7 +704,9 @@ def main(argv: list[str] | None = None) -> None:
     viewer = napari.Viewer()
     annotator = Annotator(viewer, folders, index)
     napari.run()  # returns when the napari window is closed
-    annotator.save()
+    if not annotator.save():
+        backup = annotator.save_backup()
+        print(f"Could not save to {annotator.folder}. A copy is in {backup}: copy its files back into that folder.")
 
 
 if __name__ == "__main__":

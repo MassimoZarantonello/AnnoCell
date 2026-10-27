@@ -8,21 +8,25 @@ See [docs/annotation_tool.md](docs/annotation_tool.md) for the design and every 
 
 ## For the annotator
 
-Install once with [uv](https://docs.astral.sh/uv/) (Mac or Windows), then open the folder you received:
+Install once with [uv](https://docs.astral.sh/uv/) (Mac or Windows), then open your own folder: the tool opens
+your latest round.
 
 ```bash
 uv tool install "annocell[gui] @ <wheel or git URL>"
-annocell <folder>
+annocell <your folder>
 ```
 
-Or just `annocell`, then **Open folder** in the panel to pick the folder.
+Or just `annocell`, then **Open folder** in the panel to pick it.
 
 - **Right click**: new cell; move around it, back to the start (or click again) to close it. `Esc` drops it.
 - **N** draw mode (left click draws), **D** delete mode (click or drag over cells to delete), **O** OK mode (click or
   drag over cells to mark them OK, or back to not checked when the first one was OK); **Esc** back to navigating.
 - **Shift+O** all in view OK.
 - **Shift+M** macrophage (test images only).
-- A wrong outline: delete it, draw it again. Saved automatically.
+- A wrong outline: delete it, draw it again.
+- Saved automatically. If the panel says **Not saved** (drive unreachable), keep working: your changes are kept and
+  saved as soon as the drive is back.
+- A **closed** round opens read-only: you can look, not change.
 
 ## The folder (`annocell.folder`)
 
