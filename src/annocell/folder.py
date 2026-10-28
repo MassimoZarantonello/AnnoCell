@@ -27,7 +27,11 @@ One folder per image (an ROI), self-contained so that it can be copied to the an
   ``channels``, ``visible_channels``, ``colours``, ``start_segmentation``, ``compare``;
 - written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only;
 - written by the tool at every save: ``review`` (``summary``, ``saved_at``, ``started_at``: the first save, i.e. the
-  first change; ``completed_at``: when the last cell was checked, None while some are not); ``is_complete`` reads it.
+  first change; ``completed_at``: when the last cell was checked, None while some are not; ``start_cells`` and
+  ``deleted``: the proposal's cells, and those deleted); ``is_complete`` reads it.
+
+Next to the annotators' folders, ``<root>/scores/<model>.json``: each model's score on the test regions
+(``write_score``, ``read_scores``), written by the pipeline.
 
 Files are written to a temporary name and renamed, so a crash during a save never leaves a broken file.
 """
@@ -58,6 +62,7 @@ COMPARE = "compare"
 # Folder names in the tree, under an annotator's folder.
 ROUND = "round_{:02d}"
 TEST = "test"
+SCORES = "scores"  # <root>/scores/<model>.json: each model's score on the test regions (``write_score``)
 ANNOTATOR = re.compile(r"[a-z0-9-]+")  # a folder name on Mac and Windows alike
 
 # Review state of a cell (``state``), and where its outline comes from (``origin``).
@@ -261,11 +266,14 @@ def summary(cells: Mapping[int, Cell]) -> dict:
     }
 
 
-def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell]) -> None:
+def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell], start: np.ndarray | None = None) -> None:
     """Write the masks, the cell table and the review summary in ``annotation.json``.
 
     The review keeps when the annotator started (the first save) and when they finished (the save at which no cell
     was left unreviewed; cleared if a cell is unchecked again). Not how long they worked: only these two moments.
+    With ``start`` (the proposal), it also counts the proposal's cells (``start_cells``) and those deleted
+    (``deleted``: gone entirely; a cell that lost pixels is edited): with ``proposed`` (kept) and ``edited``, how
+    much of the proposal had to be fixed.
     """
     write_masks(folder, masks)
     write_cells(folder, cells)
@@ -273,10 +281,32 @@ def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell]) -> No
     previous = record.get("review") or {}
     now = datetime.now().isoformat(timespec="seconds")
     review = {**summary(cells), "saved_at": now, "started_at": previous.get("started_at") or now}
+    if start is not None:
+        proposed = np.unique(start[start > 0])
+        review["start_cells"] = int(len(proposed))
+        review["deleted"] = int(len(np.setdiff1d(proposed, np.unique(masks[masks > 0]))))
     done = review["cells"] > 0 and review[UNREVIEWED] == 0
     review["completed_at"] = (previous.get("completed_at") or now) if done else None
     record["review"] = review
     write_record(folder, record)
+
+
+def write_score(root: str | Path, score: Mapping) -> Path:
+    """Write the score of one model on the test regions to ``<root>/scores/<model>.json`` and return the file.
+
+    ``score``: ``model`` (its name), ``round`` (the round whose corrections it was trained on; 0 for the starting
+    model), ``scored_on`` and ``regions``: one entry per test region with ``region``, ``annotator`` and the scores
+    (``AP@0.5``, ``AP@0.75``, ...). Written by the pipeline (AnnoLoop), read by overviews (AnnOverview).
+    """
+    path = Path(root) / SCORES / f"{score['model']}.json"
+    _write_atomic(path, lambda f: f.write((json.dumps(dict(score), indent=2) + "\n").encode()))
+    return path
+
+
+def read_scores(root: str | Path) -> list[dict]:
+    """Every model's score on the test regions under ``root``, by round then model name."""
+    scores = [json.loads(p.read_text()) for p in (Path(root) / SCORES).glob("*.json")]
+    return sorted(scores, key=lambda s: (s.get("round", 0), s.get("model", "")))
 
 
 def image_folders(parent: str | Path) -> list[Path]:

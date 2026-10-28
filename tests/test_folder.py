@@ -113,3 +113,19 @@ def test_complete_and_closed(train_folder):
     record = af.read_record(train_folder)
     assert af.is_closed(record) and record["closed_on"] == "2026-11-02"
     assert af.is_complete(record)  # closing keeps the review
+
+
+def test_review_counts_deleted_cells_and_scores_are_stored(train_folder, tmp_path):
+    start = af.read_start(train_folder)
+    masks = start.copy()
+    masks[masks == 3] = 0  # deleted
+    masks[0:2, 0:10] = 0  # cell 1 edited
+    af.save(train_folder, masks, af.sync_cells({}, masks, start), start)
+    review = af.read_record(train_folder)["review"]
+    assert (review["start_cells"], review["deleted"], review[af.EDITED], review[af.PROPOSED]) == (3, 1, 1, 1)
+    first = {"model": "m2", "round": 2, "regions": [{"region": "p", "AP@0.5": 0.8}]}
+    af.write_score(tmp_path, first)
+    af.write_score(tmp_path, {"model": "m1", "round": 1, "regions": []})
+    assert [s["model"] for s in af.read_scores(tmp_path)] == ["m1", "m2"]
+    assert af.read_scores(tmp_path / "nothing") == []
+    assert {r.annotator for r in af.rois(tmp_path)} == {"alice"}  # the scores folder is not an annotator

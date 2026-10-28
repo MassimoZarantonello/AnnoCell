@@ -473,7 +473,7 @@ class Annotator:
         data = self.masks.data
         self.cells = af.sync_cells(self.cells, data, self.start)
         try:
-            af.save(self.folder, data, self.cells)
+            af.save(self.folder, data, self.cells, self.start)
         except OSError as error:
             if self.save_error is None:
                 show_warning(f"Not saved ({error}). Your changes are kept; trying again every few seconds.")
@@ -494,7 +494,7 @@ class Annotator:
         ``~/AnnoCell unsaved/<annotator>_<round>_<image>/``, to be copied back into the image folder."""
         folder = Path.home() / "AnnoCell unsaved" / "_".join(self.folder.parts[-3:])
         af.write_record(folder, self.record)
-        af.save(folder, self.masks.data, self.cells)
+        af.save(folder, self.masks.data, self.cells, self.start)
         return folder
 
     def _bind_keys(self) -> None:
