@@ -184,7 +184,8 @@ Drawn once and then fixed.
 - Training or segmenting from the GUI.
 - Per-cell confidence (needs the segmentation step to save Cellpose's probability map).
 - Several annotators on the same ROI (blending them is the pipeline's: macroseg `docs/concurrent_annotations.md`),
-  locking, time per image (planned as sessions per ROI, AnnOverview `docs/design.md`).
+  locking, time per image (decided: not measured; the review records only when an ROI was started and finished,
+  `started_at` / `completed_at`).
 - Classification of cells (macrophage / other): a later phase (except the macrophage flag of test mode).
 
 ## Packaging and installation

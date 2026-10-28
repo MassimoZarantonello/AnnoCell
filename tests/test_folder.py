@@ -98,7 +98,17 @@ def test_complete_and_closed(train_folder):
     for cell in cells.values():
         cell.state = af.OK
     af.save(train_folder, masks, cells)
-    assert af.is_complete(af.read_record(train_folder))
+    review = af.read_record(train_folder)["review"]
+    assert af.is_complete(af.read_record(train_folder)) and review["completed_at"] and review["started_at"]
+    started, completed = review["started_at"], review["completed_at"]
+    af.save(train_folder, masks, cells)  # saved again: both moments kept
+    assert af.read_record(train_folder)["review"]["completed_at"] == completed
+    cells[1].state = af.UNREVIEWED
+    af.save(train_folder, masks, cells)  # a cell unchecked again: no longer finished, still started
+    review = af.read_record(train_folder)["review"]
+    assert review["completed_at"] is None and review["started_at"] == started
+    cells[1].state = af.OK
+    af.save(train_folder, masks, cells)
     af.close(train_folder, date(2026, 11, 2))
     record = af.read_record(train_folder)
     assert af.is_closed(record) and record["closed_on"] == "2026-11-02"

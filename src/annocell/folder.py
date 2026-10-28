@@ -26,7 +26,8 @@ One folder per image (an ROI), self-contained so that it can be copied to the an
   ``test``), ``source`` (the slide) and ``region`` (``[y0, y1, x0, x1]`` in slide pixels), ``exported_on``,
   ``channels``, ``visible_channels``, ``colours``, ``start_segmentation``, ``compare``;
 - written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only;
-- written by the tool at every save: ``review`` (``summary`` and ``saved_at``); ``is_complete`` reads it.
+- written by the tool at every save: ``review`` (``summary``, ``saved_at``, ``started_at``: the first save, i.e. the
+  first change; ``completed_at``: when the last cell was checked, None while some are not); ``is_complete`` reads it.
 
 Files are written to a temporary name and renamed, so a crash during a save never leaves a broken file.
 """
@@ -261,11 +262,20 @@ def summary(cells: Mapping[int, Cell]) -> dict:
 
 
 def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell]) -> None:
-    """Write the masks, the cell table and the review summary in ``annotation.json``."""
+    """Write the masks, the cell table and the review summary in ``annotation.json``.
+
+    The review keeps when the annotator started (the first save) and when they finished (the save at which no cell
+    was left unreviewed; cleared if a cell is unchecked again). Not how long they worked: only these two moments.
+    """
     write_masks(folder, masks)
     write_cells(folder, cells)
     record = read_record(folder)
-    record["review"] = {**summary(cells), "saved_at": datetime.now().isoformat(timespec="seconds")}
+    previous = record.get("review") or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    review = {**summary(cells), "saved_at": now, "started_at": previous.get("started_at") or now}
+    done = review["cells"] > 0 and review[UNREVIEWED] == 0
+    review["completed_at"] = (previous.get("completed_at") or now) if done else None
+    record["review"] = review
     write_record(folder, record)
 
 
