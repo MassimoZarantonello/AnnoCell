@@ -2,20 +2,19 @@
 
 Status: version 1 built (`annocell`, command `annocell`); tried by Massimo, not yet by an annotator.
 Replaces the Cellpose GUI step (notebook 02) of the annotation rounds.
-Written for [macroseg](../../macroseg) (its `docs/design.md` for the project, `macroseg.annotation` for exporting and
-finishing a round); the tool itself only needs a folder in the AnnoCell layout.
+Written for the annotation loop of [AnnoLoop](../../AnnoLoop) (the pipeline, which started as a copy of macroseg and
+still has the package name `macroseg`; `macroseg.annotation` exports and closes rounds); the tool itself only needs
+a folder in the AnnoCell layout.
 
 ## Use
 
-Massimo exports, in Python, from macroseg (`macroseg.annotation`):
+Massimo exports, in Python, from AnnoLoop (`macroseg.annotation`):
 
 ```python
 export_round(sdata, cfg, "membrane_dapi", root, 2, "alice", compare=["exp201_test_crop_r01"], models_root=models)
 export_test(sdata, cfg, [y0, y1, x0, x1], root, "carla")  # a test region, drawn from scratch
 close_round(root, 2)  # the round is over: its ROIs become read-only
 ```
-
-(The pipeline is now AnnoLoop, which started as a copy of macroseg.)
 
 The annotator opens their own folder; the tool opens their latest round that is not closed (else their test
 regions, else their latest round, read-only):
@@ -28,7 +27,16 @@ A round folder or a single image folder opens too. Or `annocell` alone: napari o
 **Open folder** button picks the folder in the system's folder picker. napari's own File → Open is not used: it would open the files as plain layers,
 outside the tool.
 
-When the folders are back, `finish(folder)` records the changes (complete = no cell left unreviewed).
+Three verbs, three owners:
+
+- **closing** a round (`close_round(root, n)` in AnnoLoop, which calls `annocell.folder.close` on each ROI) writes
+  `closed_on` in `annotation.json`: the round is over, its ROIs open read-only from then on, and AnnoLoop refuses to
+  export into it. Nothing else changes: the masks and the review stay as the annotator left them;
+- **complete** (`annocell.folder.is_complete`) is not a step but a test on the review: at least one cell and none
+  unreviewed. Training takes the complete ROIs, closed or not;
+- **finishing** an ROI (`finish(folder)` in AnnoLoop, optional) writes in `annotation.json` its `status`
+  (`complete` / `partial`) and `start_score`, the score of the proposal against the corrections. It does not count
+  the corrections: those are AnnoCell's review.
 
 ## Goal
 
@@ -79,13 +87,18 @@ draw with the space bar to pan (losing the plain drag to pan was worse).
 | Delete a cell | delete mode (`D`): click it, or drag over several | cells removed; a drag is one undo step |
 | Fix an outline | delete it (`D`) and draw it again | napari's brush, eraser, fill, polygon and picker are hidden and switched off (decided after trying them: they made it easy to damage the masks by accident) |
 | Mark OK | OK mode (`O`): click a cell, or drag over several | the outline is right; a stroke starting on an OK cell takes the cells back to unreviewed (the first cell decides the direction, so passing over a cell twice does not flip it back) |
-| Mark all remaining in view as OK | `Shift+O` or button | every unreviewed cell **entirely** in view becomes OK (cells cut by the view edge are left) |
+| Mark all remaining in view as OK | `Shift+O` or button | every unreviewed cell **entirely** in view becomes OK, recorded as OK **in bulk** (cells cut by the view edge are left; cells already OK keep how they became OK) |
 | Macrophage on / off | `Shift+M`, test mode only | the cell is marked as a macrophage |
 | Go to an unreviewed cell | button | centres the view on the nearest unreviewed cell (to finish an image) |
 | Next / previous image | two buttons | saves, then moves through the images of the round |
 
 Every cell is either **unreviewed** or **OK**; a drawn or edited cell is OK. A cell that only lost pixels to a new
 cell keeps its state (the annotator has not looked at it). An image is **complete** when no cell is unreviewed.
+
+**How a cell became OK** (`ok_by` in `cells.csv`): `hand` (marked in OK mode, edited or drawn) or `bulk` (all in view
+OK); the last action wins, and a cell taken back to unreviewed forgets it. So that an annotator may clear the easy
+cells quickly (allowed: AnnoLoop D6) while the statistics can still tell cells looked at one by one from cells
+cleared in bulk (D7). Not a monitoring of the annotator: no time, no order, only the last action per cell.
 Outlines: yellow unreviewed, green OK, magenta macrophage (test mode).
 
 `origin` (`proposed` / `edited` / `drawn`) is not tracked from the edits but recomputed against the start masks at
@@ -108,7 +121,9 @@ connection never leaves half a file.
 
 **Closed rounds.** An ROI whose round is over (`closed_on`, written by the pipeline) opens **read-only**: no editing
 mode, no drawing, no marking, never saved; the panel says "Round N closed: read-only". Its masks were already used
-for training: changing them afterwards would make that training impossible to reproduce.
+for training: changing them afterwards would make that training impossible to reproduce. A round closed while an
+ROI of it is open: the tool reads `closed_on` before every save, and the next save (within 3 seconds) turns the ROI
+read-only and writes nothing; the changes since the last save are dropped, with a warning.
 
 ## Data
 
@@ -126,12 +141,22 @@ tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, 
 - `start_masks.tif`: the proposed masks as given to the annotator (to count corrections); absent in test mode;
 - `compare/<segmentation>.tif`: the comparison layers; "trained on this image" is decided at export from each
   model's `model.json`; absent in test mode;
-- `masks.tif`: the current masks (uint32 labels). Replaces `<image>_seg.npy`: the Cellpose GUI is no longer
-  used and `_seg.npy` is a pickle. `corrected_masks()` keeps reading `_seg.npy` for round 1;
+- `masks.tif`: the current masks (uint32 labels). Replaces `<image>_seg.npy` of the Cellpose GUI (a pickle; the
+  GUI is no longer used);
 - `cells.csv`: one row per cell: `cell_ID`, `state` (`unreviewed` / `ok`), `origin` (`proposed` / `edited` /
-  `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `macrophage` (test mode only);
-- `annotation.json`: as today (annotator, round, role, provenance, start segmentation, counts, start score),
-  `closed_on` when the round is over, plus the review summary (cells OK / unreviewed).
+  `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `macrophage` (test mode only),
+  `ok_by` (`hand` / `bulk`, empty while unreviewed);
+- `annotation.json`: written by the pipeline only: annotator, round, `mode` (`train` / `test`), provenance,
+  channels, start segmentation, `closed_on` when the round is over, and what AnnoLoop's `finish` adds (`status`,
+  `start_score`);
+- `review.json`: written by the tool only, at every save: the counts (cells, OK, unreviewed, OK by hand and in
+  bulk, kept / edited / drawn, `start_cells`, `deleted`, macrophages) and `saved_at`, `started_at`, `completed_at`.
+  The **one definition** of the correction counts: AnnoLoop and AnnOverview read them, and do not recount.
+
+**One writer per file**: the pipeline writes `annotation.json`, the tool writes `masks.tif`, `cells.csv` and
+`review.json`. Format 1 kept the review in `annotation.json`, so a save and a `finish` or a `close` running at the
+same moment could overwrite each other's fields; format 2 (`format_version`) moved it out. Format-1 folders are not
+read (no real round used them): export them again.
 
 Saves write a temporary file and rename it, so a crash during a save cannot corrupt the masks.
 
@@ -148,8 +173,8 @@ groups on corrected cells, and how much of it is autofluorescence (`autofluo_APC
 
 ## Training
 
-Not in the tool. Fine-tuning runs separately (notebook 04 now, an iteration script later). The tool only
-picks up a new model's segmentation of the next image as its proposal, when it exists.
+Not in the tool. Fine-tuning runs in AnnoLoop (`macroseg.train`, notebook 04 for now, a cluster script later). The
+tool only picks up a new model's segmentation of the next image as its proposal, when it exists.
 
 ## Test ROI
 
@@ -169,9 +194,8 @@ Drawn once and then fixed.
 - **No overlap with training, enforced in code**: patch coordinates are stored in slide pixels; crops and tiles
   within one cell diameter (60 px) of a patch are rejected. Patches lie outside every crop already annotated
   (Exp201: outside `[2000:4048, 2000:4048]`).
-- **Fully excluded from training**: test patches never enter `training_set`, not even as Cellpose's test loss
-  (the 20 % held-out tiles give the validation loss). Today `split_tiles` sends `role == "test"` images to the
-  test split: to change.
+- **Fully excluded from training**: test patches never enter `training_set`, not even as Cellpose's test loss:
+  AnnoLoop's `training_set` reads only the complete ROIs of the rounds, never `<annotator>/test/`.
 - **Macrophages marked by hand here only**: one key toggles a macrophage flag per cell, in test mode only. It also
   calibrates the F4/80 rule (agreement with high F4/80 on the drawn masks, effect of autofluorescence).
 - **Drawn by the biologist**, the same person who corrects the training images (otherwise part of every score is

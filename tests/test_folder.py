@@ -56,8 +56,9 @@ def test_save_writes_masks_cells_and_review(train_folder):
     af.save(train_folder, masks, cells)
     np.testing.assert_array_equal(af.read_masks(train_folder), masks)
     assert af.read_cells(train_folder) == cells
-    review = af.read_record(train_folder)["review"]
+    review = af.read_review(train_folder)
     assert (review["cells"], review[af.UNREVIEWED], review[af.DRAWN], review["macrophages"]) == (3, 2, 1, 1)
+    assert "review" not in af.read_record(train_folder)  # annotation.json is the pipeline's: never written here
     assert not list(train_folder.glob(".*.tmp"))  # no temporary file left behind
 
 
@@ -90,29 +91,29 @@ def test_annotator_names_are_checked(tmp_path):
 
 def test_complete_and_closed(train_folder):
     record = af.read_record(train_folder)
-    assert not af.is_complete(record) and not af.is_closed(record)  # never opened: no review yet
+    assert not af.is_complete(af.read_review(train_folder)) and not af.is_closed(record)  # never opened: no review yet
     masks = af.read_start(train_folder)
     cells = af.sync_cells({}, masks, masks)
     af.save(train_folder, masks, cells)
-    assert not af.is_complete(af.read_record(train_folder))  # every cell still unreviewed
+    assert not af.is_complete(af.read_review(train_folder))  # every cell still unreviewed
     for cell in cells.values():
         cell.state = af.OK
     af.save(train_folder, masks, cells)
-    review = af.read_record(train_folder)["review"]
-    assert af.is_complete(af.read_record(train_folder)) and review["completed_at"] and review["started_at"]
+    review = af.read_review(train_folder)
+    assert af.is_complete(af.read_review(train_folder)) and review["completed_at"] and review["started_at"]
     started, completed = review["started_at"], review["completed_at"]
     af.save(train_folder, masks, cells)  # saved again: both moments kept
-    assert af.read_record(train_folder)["review"]["completed_at"] == completed
+    assert af.read_review(train_folder)["completed_at"] == completed
     cells[1].state = af.UNREVIEWED
     af.save(train_folder, masks, cells)  # a cell unchecked again: no longer finished, still started
-    review = af.read_record(train_folder)["review"]
+    review = af.read_review(train_folder)
     assert review["completed_at"] is None and review["started_at"] == started
     cells[1].state = af.OK
     af.save(train_folder, masks, cells)
     af.close(train_folder, date(2026, 11, 2))
     record = af.read_record(train_folder)
     assert af.is_closed(record) and record["closed_on"] == "2026-11-02"
-    assert af.is_complete(record)  # closing keeps the review
+    assert af.is_complete(af.read_review(train_folder))  # closing keeps the review
 
 
 def test_review_counts_deleted_cells_and_scores_are_stored(train_folder, tmp_path):
@@ -121,7 +122,7 @@ def test_review_counts_deleted_cells_and_scores_are_stored(train_folder, tmp_pat
     masks[masks == 3] = 0  # deleted
     masks[0:2, 0:10] = 0  # cell 1 edited
     af.save(train_folder, masks, af.sync_cells({}, masks, start), start)
-    review = af.read_record(train_folder)["review"]
+    review = af.read_review(train_folder)
     assert (review["start_cells"], review["deleted"], review[af.EDITED], review[af.PROPOSED]) == (3, 1, 1, 1)
     first = {"model": "m2", "round": 2, "regions": [{"region": "p", "AP@0.5": 0.8}]}
     af.write_score(tmp_path, first)
@@ -129,3 +130,19 @@ def test_review_counts_deleted_cells_and_scores_are_stored(train_folder, tmp_pat
     assert [s["model"] for s in af.read_scores(tmp_path)] == ["m1", "m2"]
     assert af.read_scores(tmp_path / "nothing") == []
     assert {r.annotator for r in af.rois(tmp_path)} == {"alice"}  # the scores folder is not an annotator
+
+
+def test_how_cells_became_ok(train_folder):
+    start = af.read_start(train_folder)
+    masks = start.copy()
+    masks[12:20, 20:30] = 4  # drawn: OK by hand
+    cells = af.sync_cells({}, masks, start)
+    assert cells[4] == af.Cell(af.OK, af.DRAWN, False, af.HAND) and cells[1].ok_by == ""
+    cells[1].mark(af.OK, af.BULK)
+    cells[2].mark(af.OK)  # by hand
+    af.save(train_folder, masks, cells)
+    assert af.read_cells(train_folder) == cells
+    review = af.read_review(train_folder)
+    assert (review["ok_hand"], review["ok_bulk"], review[af.UNREVIEWED]) == (2, 1, 1)
+    cells[1].mark(af.UNREVIEWED)  # unchecked again: forgets how
+    assert cells[1].ok_by == ""

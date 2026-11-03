@@ -36,7 +36,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         tool.toggle_mode(TOGGLE)  # O: OK mode
         assert tool.mode == TOGGLE and not tool.masks.mouse_pan and tool.masks.cursor == "pointing"
         _click(tool, viewer, 1, (5, 5))  # cell 1
-        assert tool.cells[1].state == af.OK
+        assert tool.cells[1].state == af.OK and tool.cells[1].ok_by == af.HAND
         tool.toggle_mode(TOGGLE)  # O again: back to navigating
         assert tool.mode == NAVIGATE and tool.masks.mouse_pan
 
@@ -60,7 +60,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         assert tool.draw_cell(np.array([[12.0, 20], [12, 21], [13, 21]])) == 0  # too small: a slip
         cell = tool.draw_cell(np.array([[12.0, 20], [12, 29], [19, 29], [19, 20]]))
         QApplication.processEvents()
-        assert cell == 4 and tool.cells[4] == af.Cell(af.OK, af.DRAWN, False)
+        assert cell == 4 and tool.cells[4] == af.Cell(af.OK, af.DRAWN, False, af.HAND)
         assert tool.draw_cell(np.array([[12.0, 0], [12, 9], [19, 9], [19, 0]])) == 5  # each outline a new cell
         QApplication.processEvents()
         # Left click in draw mode, move (no button held), back to the start: the outline closes by itself.
@@ -83,16 +83,17 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         QApplication.processEvents()
         assert (tool.masks.data[14:17, 14:17] == 7).all()
         tool.save()
-        review = af.read_record(train_folder)["review"]
+        review = af.read_review(train_folder)
         assert (review["cells"], review[af.OK], review[af.UNREVIEWED]) == (6, 6, 0)
         assert (
             review[af.DRAWN] == 4 and review[af.EDITED] == 1 and set(af.read_cells(train_folder)) == {1, 2, 4, 5, 6, 7}
         )
 
-        tool.cells[1].state = af.UNREVIEWED
+        tool.cells[1].mark(af.UNREVIEWED)
         viewer.reset_view()
         tool.all_in_view_ok()  # the whole image is in view
-        assert tool.cells[1].state == af.OK
+        assert tool.cells[1] == af.Cell(af.OK, af.PROPOSED, False, af.BULK)
+        assert tool.cells[4].ok_by == af.HAND  # already OK: left as it was
 
         tool.folders = [train_folder, test_folder]
         tool.go(1)
@@ -105,7 +106,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         viewer.cursor.position = (5, 5)
         tool.toggle_macrophage()
         tool.go(-1)  # saves the test patch
-        assert af.read_cells(test_folder) == {1: af.Cell(af.OK, af.DRAWN, True)}
+        assert af.read_cells(test_folder) == {1: af.Cell(af.OK, af.DRAWN, True, af.HAND)}
     finally:
         viewer.close()
 
@@ -254,6 +255,25 @@ def test_closed_roi_is_read_only(train_folder):
         tool.all_in_view_ok()
         assert all(c.state == af.UNREVIEWED for c in tool.cells.values())
         assert tool.save() and not (train_folder / af.MASKS).exists()  # never written
+    finally:
+        viewer.close()
+
+
+def test_round_closed_while_open_turns_read_only(train_folder):
+    from annocell.app import NAVIGATE, TOGGLE, Annotator
+
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        tool.toggle_mode(TOGGLE)
+        _click(tool, viewer, 1, (5, 5))  # cell 1 OK
+        assert tool.save() and af.read_cells(train_folder)[1].state == af.OK
+        af.close(train_folder)  # the pipeline closes the round
+        _click(tool, viewer, 1, (5, 15))  # cell 2 OK, after the round closed
+        assert tool.save()  # nothing written, the annotator can move on
+        assert af.read_cells(train_folder)[2].state == af.UNREVIEWED and af.is_closed(af.read_record(train_folder))
+        assert tool.read_only and not tool.masks.editable and tool.mode == NAVIGATE and not tool.dirty
+        assert "closed: read-only" in _panel(tool)
     finally:
         viewer.close()
 

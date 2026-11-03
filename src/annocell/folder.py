@@ -15,20 +15,26 @@ One folder per image (an ROI), self-contained so that it can be copied to the an
   model was trained on this image;
 - ``masks.tif``: the current masks (uint32 labels), written by the tool;
 - ``cells.csv``: one row per cell of ``masks.tif``: ``cell_ID``, ``state`` (``unreviewed`` / ``ok``),
-  ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks) and ``macrophage``
-  (0 / 1, test mode only);
-- ``annotation.json``: where it all comes from (written by the exporting pipeline, e.g. macroseg), plus the review
-  summary; ``format_version`` is the version of this layout (``FORMAT_VERSION``).
+  ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks), ``macrophage``
+  (0 / 1, test mode only) and ``ok_by`` (how an OK cell became OK: ``hand`` or ``bulk``, empty while unreviewed);
+- ``annotation.json``: where it all comes from, written by the pipeline (AnnoLoop) only, never by the tool;
+  ``format_version`` is the version of this layout (``FORMAT_VERSION``);
+- ``review.json``: the review summary, written by the tool only, at every save (``read_review``).
+
+One writer per file, so that the pipeline and the tool can never overwrite each other's fields.
 
 ``annotation.json`` fields the tool and overviews read (all optional except ``format_version``):
 
 - written at export: ``annotator``, ``round`` (absent for a test region), ``image``, ``mode`` (``train`` /
   ``test``), ``source`` (the slide) and ``region`` (``[y0, y1, x0, x1]`` in slide pixels), ``exported_on``,
   ``channels``, ``visible_channels``, ``colours``, ``start_segmentation``, ``compare``;
-- written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only;
-- written by the tool at every save: ``review`` (``summary``, ``saved_at``, ``started_at``: the first save, i.e. the
-  first change; ``completed_at``: when the last cell was checked, None while some are not; ``start_cells`` and
-  ``deleted``: the proposal's cells, and those deleted); ``is_complete`` reads it.
+- written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only, and stops saving if
+  it had it open.
+
+``review.json`` (``save``): the counts of ``summary`` (cells, OK, unreviewed, by origin, OK by hand / in bulk,
+macrophages), ``saved_at``, ``started_at`` (the first save, i.e. the first change), ``completed_at`` (when the last
+cell was checked, None while some are not), ``start_cells`` and ``deleted`` (the proposal's cells, and those
+deleted entirely); ``is_complete`` reads it. These counts are the one definition of kept / edited / deleted / drawn.
 
 Next to the annotators' folders, ``<root>/scores/<model>.json``: each model's score on the test regions
 (``write_score``, ``read_scores``), written by the pipeline.
@@ -50,7 +56,9 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-FORMAT_VERSION = 1  # of the folder layout; bump on any change an older reader would misread
+# Of the folder layout; bump on any change an older reader would misread. 2: the review in review.json, ``ok_by`` in
+# cells.csv. Older folders are not read: export them again.
+FORMAT_VERSION = 2
 
 # File names inside an image folder.
 IMAGE = "image.tif"
@@ -58,6 +66,7 @@ START = "start_masks.tif"
 MASKS = "masks.tif"
 CELLS = "cells.csv"
 RECORD = "annotation.json"
+REVIEW = "review.json"
 COMPARE = "compare"
 # Folder names in the tree, under an annotator's folder.
 ROUND = "round_{:02d}"
@@ -68,15 +77,24 @@ ANNOTATOR = re.compile(r"[a-z0-9-]+")  # a folder name on Mac and Windows alike
 # Review state of a cell (``state``), and where its outline comes from (``origin``).
 UNREVIEWED, OK = "unreviewed", "ok"
 PROPOSED, EDITED, DRAWN = "proposed", "edited", "drawn"
+# How an OK cell became OK (``ok_by``): ``hand``, one at a time (marked, edited or drawn), or ``bulk``, with "all in
+# view OK". The last action wins.
+HAND, BULK = "hand", "bulk"
 
 
 @dataclass
 class Cell:
-    """One row of ``cells.csv``: review state, origin and (test mode) macrophage mark of a cell."""
+    """One row of ``cells.csv``: review state, origin, (test mode) macrophage mark, and how it became OK."""
 
     state: str = UNREVIEWED
     origin: str = PROPOSED
     macrophage: bool = False
+    ok_by: str = ""  # HAND or BULK when OK; empty while unreviewed
+
+    def mark(self, state: str, by: str = HAND) -> None:
+        """Set the review state; an OK cell records ``by`` (how), an unreviewed one forgets it."""
+        self.state = state
+        self.ok_by = by if state == OK else ""
 
 
 def read_record(folder: str | Path) -> dict:
@@ -84,8 +102,7 @@ def read_record(folder: str | Path) -> dict:
 
 
 def write_record(folder: str | Path, record: Mapping) -> None:
-    # Bytes, because _write_atomic opens the temporary file in binary mode (tifffile needs it).
-    _write_atomic(Path(folder) / RECORD, lambda f: f.write((json.dumps(record, indent=2) + "\n").encode()))
+    _write_json(Path(folder) / RECORD, record)
 
 
 def is_test(record: Mapping) -> bool:
@@ -93,18 +110,26 @@ def is_test(record: Mapping) -> bool:
     return record.get("mode") == "test"
 
 
-def is_complete(record: Mapping) -> bool:
-    """Every cell checked (at least one cell, none unreviewed) at the last save: what training takes.
+def read_review(folder: str | Path) -> dict:
+    """The review summary the tool wrote at its last save (``review.json``); empty if the tool never saved."""
+    path = Path(folder) / REVIEW
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def is_complete(review: Mapping) -> bool:
+    """Every cell checked (at least one cell, none unreviewed) at the last save: what training takes. ``review``:
+    from ``read_review``.
 
     For a test region (drawn from scratch, every drawn cell OK) it only says that cells were drawn, not that the
     drawing is finished.
     """
-    review = record.get("review") or {}
     return review.get("cells", 0) > 0 and review.get(UNREVIEWED, 1) == 0
 
 
 def close(folder: str | Path, on: date | None = None) -> None:
-    """The round of this ROI is over: ``closed_on`` (default today); the tool then opens the ROI read-only."""
+    """The round of this ROI is over: ``closed_on`` (default today) in ``annotation.json``. The tool then opens the
+    ROI read-only, and one that has it open stops saving at its next save. The review and the masks stay as they
+    are."""
     record = read_record(folder)
     record["closed_on"] = (on or date.today()).isoformat()
     write_record(folder, record)
@@ -202,7 +227,7 @@ def read_cells(folder: str | Path) -> dict[int, Cell]:
         return {}
     with path.open(newline="") as f:
         return {
-            int(row["cell_ID"]): Cell(row["state"], row["origin"], row.get("macrophage", "0") == "1")
+            int(row["cell_ID"]): Cell(row["state"], row["origin"], row.get("macrophage", "0") == "1", row["ok_by"])
             for row in csv.DictReader(f)
         }
 
@@ -211,8 +236,8 @@ def write_cells(folder: str | Path, cells: Mapping[int, Cell]) -> None:
     """Write the review table, one row per cell sorted by ID; ``macrophage`` as 0 / 1."""
 
     def write(f):
-        lines = ["cell_ID,state,origin,macrophage"]
-        lines += [f"{i},{c.state},{c.origin},{int(c.macrophage)}" for i, c in sorted(cells.items())]
+        lines = ["cell_ID,state,origin,macrophage,ok_by"]
+        lines += [f"{i},{c.state},{c.origin},{int(c.macrophage)},{c.ok_by}" for i, c in sorted(cells.items())]
         f.write(("\n".join(lines) + "\n").encode())
 
     _write_atomic(Path(folder) / CELLS, write)
@@ -244,51 +269,50 @@ def origins(masks: np.ndarray, start: np.ndarray) -> dict[int, str]:
 def sync_cells(cells: Mapping[int, Cell], masks: np.ndarray, start: np.ndarray) -> dict[int, Cell]:
     """``cells`` matched to ``masks``: deleted cells dropped, new cells added, origins recomputed.
 
-    A new cell (absent from ``cells``) is OK when drawn or edited, unreviewed when proposed.
+    A new cell (absent from ``cells``) is OK (by hand) when drawn or edited, unreviewed when proposed.
     """
     synced = {}
     for i, origin in origins(masks, start).items():
-        # A known cell keeps its state and macrophage mark; only its origin is updated.
-        cell = cells.get(i) or Cell(state=UNREVIEWED if origin == PROPOSED else OK)
-        synced[i] = Cell(cell.state, origin, cell.macrophage)
+        # A known cell keeps its state, macrophage mark and ok_by; only its origin is updated.
+        cell = cells.get(i) or (Cell(UNREVIEWED) if origin == PROPOSED else Cell(OK, ok_by=HAND))
+        synced[i] = Cell(cell.state, origin, cell.macrophage, cell.ok_by)
     return synced
 
 
 def summary(cells: Mapping[int, Cell]) -> dict:
-    """Counts of the review: cells, OK, unreviewed, by origin, macrophages."""
+    """Counts of the review: cells, OK, unreviewed, OK by hand and in bulk, by origin, macrophages."""
     values = list(cells.values())
     return {
         "cells": len(values),
         OK: sum(c.state == OK for c in values),
         UNREVIEWED: sum(c.state == UNREVIEWED for c in values),
+        **{f"ok_{by}": sum(c.state == OK and c.ok_by == by for c in values) for by in (HAND, BULK)},
         **{origin: sum(c.origin == origin for c in values) for origin in (PROPOSED, EDITED, DRAWN)},
         "macrophages": sum(c.macrophage for c in values),
     }
 
 
 def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell], start: np.ndarray | None = None) -> None:
-    """Write the masks, the cell table and the review summary in ``annotation.json``.
+    """Write the masks, the cell table and the review summary (``review.json``); ``annotation.json`` is not touched.
 
     The review keeps when the annotator started (the first save) and when they finished (the save at which no cell
     was left unreviewed; cleared if a cell is unchecked again). Not how long they worked: only these two moments.
-    With ``start`` (the proposal), it also counts the proposal's cells (``start_cells``) and those deleted
-    (``deleted``: gone entirely; a cell that lost pixels is edited): with ``proposed`` (kept) and ``edited``, how
-    much of the proposal had to be fixed.
+    It also counts the proposal's cells (``start_cells``) and those deleted (``deleted``: gone entirely; a cell that
+    lost pixels is edited): with ``proposed`` (kept) and ``edited``, how much of the proposal had to be fixed.
+    ``start``: the proposal, read from the folder if not given (empty in test mode).
     """
+    start = read_start(folder, masks.shape) if start is None else start
     write_masks(folder, masks)
     write_cells(folder, cells)
-    record = read_record(folder)
-    previous = record.get("review") or {}
+    previous = read_review(folder)
     now = datetime.now().isoformat(timespec="seconds")
     review = {**summary(cells), "saved_at": now, "started_at": previous.get("started_at") or now}
-    if start is not None:
-        proposed = np.unique(start[start > 0])
-        review["start_cells"] = int(len(proposed))
-        review["deleted"] = int(len(np.setdiff1d(proposed, np.unique(masks[masks > 0]))))
+    proposed = np.unique(start[start > 0])
+    review["start_cells"] = int(len(proposed))
+    review["deleted"] = int(len(np.setdiff1d(proposed, np.unique(masks[masks > 0]))))
     done = review["cells"] > 0 and review[UNREVIEWED] == 0
     review["completed_at"] = (previous.get("completed_at") or now) if done else None
-    record["review"] = review
-    write_record(folder, record)
+    _write_json(Path(folder) / REVIEW, review)
 
 
 def write_score(root: str | Path, score: Mapping) -> Path:
@@ -299,7 +323,7 @@ def write_score(root: str | Path, score: Mapping) -> Path:
     (``AP@0.5``, ``AP@0.75``, ...). Written by the pipeline (AnnoLoop), read by overviews (AnnOverview).
     """
     path = Path(root) / SCORES / f"{score['model']}.json"
-    _write_atomic(path, lambda f: f.write((json.dumps(dict(score), indent=2) + "\n").encode()))
+    _write_json(path, score)
     return path
 
 
@@ -339,6 +363,11 @@ def ids_inside(masks: np.ndarray, y0: int, y1: int, x0: int, x1: int) -> list[in
 def _write_tif(path: Path, array: np.ndarray) -> None:
     # minisblack: a 3-channel image is stored as 3 grey planes, not read back as an RGB picture.
     _write_atomic(path, lambda f: tifffile.imwrite(f, array, photometric="minisblack"))
+
+
+def _write_json(path: Path, data: Mapping) -> None:
+    # Bytes, because _write_atomic opens the temporary file in binary mode (tifffile needs it).
+    _write_atomic(path, lambda f: f.write((json.dumps(dict(data), indent=2) + "\n").encode()))
 
 
 def _write_atomic(path: Path, write) -> None:

@@ -3,7 +3,8 @@
 ``<folder>`` is the annotator's own folder (the tool opens their latest round that is not closed), a round (or
 test) folder, or one image folder; the tool opens the first image with cells left to review and moves through the
 others of the same round with Previous / Next. Without ``<folder>`` it opens empty, and the panel's "Open folder"
-button picks one. An ROI of a closed round (``closed_on``) opens read-only: it can be looked at, not changed.
+button picks one. An ROI of a closed round (``closed_on``) opens read-only: it can be looked at, not changed; a
+round closed while one of its ROIs is open turns it read-only at the next save.
 
 Layers: every channel of the image (napari's own controls) and the editable masks (``masks (from <segmentation>)``),
 outlined in yellow (unreviewed) or green (OK); in test mode, magenta marks macrophages. Read-only comparison masks
@@ -23,7 +24,8 @@ Modes (keys; the same key again, or ``Esc``, back to navigating):
 
 Keys on the cell under the mouse:
 
-- ``Shift+O``: mark every unreviewed cell entirely in view OK;
+- ``Shift+O``: mark every unreviewed cell entirely in view OK (``ok_by`` bulk; every other way to OK a cell is by
+  hand);
 - ``Shift+M``: macrophage on / off (test mode only).
 
 napari's own editing tools (brush, eraser, fill, polygon, picker) are hidden and switched off: a wrong outline is
@@ -74,7 +76,7 @@ class Annotator:
     - ``saved``: the masks as last written to disk, and ``dirty``: a review state changed since then;
     - ``next_id``: the ID of the next drawn cell, never reusing an ID of the start masks;
     - ``mode``: navigate, draw, delete or OK; ``drawing``: the outline being drawn, or None;
-    - ``read_only``: the ROI's round is closed: nothing can be changed or saved;
+    - ``read_only``: the ROI's round is closed (when opened, or since): nothing can be changed or saved;
     - ``save_error``: why the last save failed (e.g. the network drive unreachable), or None.
 
     With no folder open (``folders`` empty), ``masks`` is None and the keys, buttons, mouse and autosave do nothing.
@@ -373,18 +375,19 @@ class Annotator:
     def _set_state(self, cell: int, state: str) -> None:
         # Review states are not pixels: not in napari's undo history (O again undoes a mark).
         if cell in self.cells and self.cells[cell].state != state:
-            self.cells[cell].state = state
+            self.cells[cell].mark(state, af.HAND)
             self.changed()
 
     def all_in_view_ok(self) -> None:
-        """``Shift+O``: every cell entirely in view becomes OK (cells cut by the edge of the view are left)."""
+        """``Shift+O``: every unreviewed cell entirely in view becomes OK, in bulk (cells cut by the edge of the view
+        are left; cells already OK keep how they became OK)."""
         if self.read_only:
             return
         # ``corner_pixels``: the first and last visible pixel of the layer, (y, x), as napari last drew it.
         (y0, x0), (y1, x1) = np.asarray(self.masks.corner_pixels, dtype=int)[:, -2:]
         for cell in af.ids_inside(self.masks.data, y0, y1 + 1, x0, x1 + 1):
-            if cell in self.cells:
-                self.cells[cell].state = af.OK
+            if cell in self.cells and self.cells[cell].state == af.UNREVIEWED:
+                self.cells[cell].mark(af.OK, af.BULK)
         self.changed()
 
     def toggle_macrophage(self) -> None:
@@ -415,8 +418,8 @@ class Annotator:
         return int(self.masks.data[y, x]) if 0 <= y < height and 0 <= x < width else 0
 
     def _on_paint(self) -> None:
-        """After an outline, a delete, an undo or redo: the cells that gained pixels are OK, and so are those
-        trimmed to background; cells that only lost pixels to a new cell keep their state."""
+        """After an outline, a delete, an undo or redo: the cells that gained pixels are OK (by hand), and so are
+        those trimmed to background; cells that only lost pixels to a new cell keep their state."""
         data = self.masks.data
         diff = data != self.snapshot  # the pixels this edit changed
         gained = set(np.unique(data[diff]).tolist()) - {0}
@@ -424,7 +427,7 @@ class Annotator:
         # Deleted cells leave the table, new ones join it, and every origin is recomputed against the start masks.
         self.cells = af.sync_cells(self.cells, data, self.start)
         for cell in (gained | trimmed) & self.cells.keys():
-            self.cells[cell].state = af.OK
+            self.cells[cell].mark(af.OK, af.HAND)
         self.next_id = max(self.next_id, int(data.max()) + 1)
         self.snapshot = data.copy()
         self.changed()
@@ -465,6 +468,10 @@ class Annotator:
 
         If the write fails (e.g. the network drive is unreachable), everything stays in memory and ``dirty``, the
         panel says so (one warning, not one per autosave), and the next autosave tries again; returns False.
+
+        If the round was closed since the image was opened (``closed_on`` on disk), nothing is written: the image
+        turns read-only and the panel says so (its masks may already be in a training). Returns True, so the
+        annotator can move on.
         """
         from napari.utils.notifications import show_info, show_warning
 
@@ -473,6 +480,10 @@ class Annotator:
         data = self.masks.data
         self.cells = af.sync_cells(self.cells, data, self.start)
         try:
+            record = af.read_record(self.folder)  # one small file, every few seconds: cheap
+            if af.is_closed(record):
+                self._closed_meanwhile(record)
+                return True
             af.save(self.folder, data, self.cells, self.start)
         except OSError as error:
             if self.save_error is None:
@@ -488,6 +499,16 @@ class Annotator:
         self.dirty = False
         self.widget.update_status()
         return True
+
+    def _closed_meanwhile(self, record: dict) -> None:
+        """The round was closed while this image was open: read-only from now on, the last changes not saved."""
+        from napari.utils.notifications import show_warning
+
+        self.record, self.read_only, self.dirty, self.save_error = record, True, False, None
+        self.masks.editable = False
+        self.set_mode(NAVIGATE)  # read-only: also drops an outline being drawn
+        show_warning("This round was closed: the image is now read-only; changes since the last save are not saved.")
+        self.widget.update_status()
 
     def save_backup(self) -> Path:
         """When the image folder cannot be written as napari closes: the masks, the cell table and the record go to
@@ -668,7 +689,7 @@ def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
     if single:
         return folders, folders.index(path)
     # An image never opened has no review yet: it counts as having cells left (default 1).
-    pending = [i for i, f in enumerate(folders) if af.read_record(f).get("review", {}).get(af.UNREVIEWED, 1) > 0]
+    pending = [i for i, f in enumerate(folders) if af.read_review(f).get(af.UNREVIEWED, 1) > 0]
     return folders, pending[0] if pending else 0
 
 

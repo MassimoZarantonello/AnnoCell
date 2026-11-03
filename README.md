@@ -32,10 +32,10 @@ Or just `annocell`, then **Open folder** in the panel to pick it.
 
 One folder per annotator (`<root>/<annotator>/round_<NN>/<roi>/`, and `test/<roi>/` for test regions), one
 folder per ROI inside, self-contained: `image.tif` (all channels), `start_masks.tif` (the proposal), `compare/`
-(read-only masks of other segmentations), `masks.tif` and `cells.csv` (written by the tool: masks, and review state
-and origin of every cell) and `annotation.json` (provenance, channels, review summary, `format_version`). The
-pipeline writes the folder and reads the corrections back with `annocell.folder` (numpy and tifffile only, no
-napari).
+(read-only masks of other segmentations), `annotation.json` (provenance, channels, `closed_on`, `format_version`:
+written by the pipeline only), and, written by the tool only, `masks.tif`, `cells.csv` (review state, origin and
+how each cell became OK: by hand or in bulk) and `review.json` (the review summary). The pipeline writes the folder
+and reads the corrections back with `annocell.folder` (numpy and tifffile only, no napari).
 
 ## Development
 
