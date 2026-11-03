@@ -22,8 +22,10 @@ Or just `annocell`, then **Open folder** in the panel to pick it.
 - **N** draw mode (left click draws), **D** delete mode (click or drag over cells to delete), **O** OK mode (click or
   drag over cells to mark them OK, or back to not checked when the first one was OK); **Esc** back to navigating.
 - **Shift+O** all in view OK.
-- **Shift+M** macrophage (test images only).
-- A wrong outline: delete it, draw it again.
+- A wrong outline: delete it, draw it again (or napari's brush and eraser, from their buttons: their keys are off).
+- **Done** (button) when every cell is OK: the image is finished. With cells still not checked, it says how many.
+  **Image >** goes on only once the image is marked done; otherwise it says why. Closing napari with an image not
+  done asks first.
 - Saved automatically. If the panel says **Not saved** (drive unreachable), keep working: your changes are kept and
   saved as soon as the drive is back.
 - A **closed** round opens read-only: you can look, not change.

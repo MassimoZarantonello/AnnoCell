@@ -13,6 +13,19 @@ from annocell import folder as af
 napari = pytest.importorskip("napari")
 
 
+@pytest.fixture(autouse=True)
+def no_message_boxes(monkeypatch):
+    """A Qt message box would wait for a click forever: a message no test expects fails it instead, and a question
+    (leave an image not done?) is answered yes, so that closing the viewer at the end of a test goes through."""
+    from annocell import app
+
+    def unexpected(text, parent=None):
+        raise AssertionError(f"unexpected message: {text}")
+
+    monkeypatch.setattr(app, "_message", unexpected)
+    monkeypatch.setattr(app, "_ask", lambda text, parent=None: True)
+
+
 def test_tool_corrects_marks_and_saves(train_folder, test_folder):
     from qtpy.QtWidgets import QApplication
 
@@ -45,11 +58,15 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         _click(tool, viewer, 1, (15, 5))  # cell 3
         QApplication.processEvents()  # the tool reads the new pixels after the paint event
         assert 3 not in tool.cells and not (tool.masks.data == 3).any()
-        tool.masks.mode = "paint"  # napari's brush (key P) is switched off at once
-        assert tool.masks.mode == "pan_zoom" and tool.mode == DELETE
-        assert viewer.window._qt_viewer.controls.widgets[tool.masks].paint_button.isHidden()
-        tool.set_mode(NAVIGATE)
-        assert tool.masks.mouse_pan
+        keys = viewer.window._qt_viewer._key_map_handler
+        for key in ("P", "E", "F", "2", "M"):  # napari's keys for its tools and labels do nothing
+            keys.press_key(key)
+            keys.release_key(key)
+        assert tool.masks.mode == "pan_zoom" and tool.mode == DELETE and tool.masks.selected_label == 4
+        assert not viewer.window._qt_viewer.controls.widgets[tool.masks].paint_button.isHidden()  # buttons stay
+        tool.masks.mode = "paint"  # napari's brush, picked from its button: out of delete mode
+        assert tool.mode == NAVIGATE and tool.masks.mouse_pan
+        tool.masks.mode = "pan_zoom"
 
         tool.masks.data_setitem((np.array([0, 1]), np.array([12, 12])), 0)  # two pixels of cell 2 to background
         QApplication.processEvents()
@@ -60,7 +77,8 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         assert tool.draw_cell(np.array([[12.0, 20], [12, 21], [13, 21]])) == 0  # too small: a slip
         cell = tool.draw_cell(np.array([[12.0, 20], [12, 29], [19, 29], [19, 20]]))
         QApplication.processEvents()
-        assert cell == 4 and tool.cells[4] == af.Cell(af.OK, af.DRAWN, False, af.HAND)
+        assert cell == 4 and tool.cells[4] == af.Cell(af.OK, af.DRAWN, af.HAND)
+        assert tool.masks.selected_label == 5  # napari's brush now starts a new cell, not cell 4
         assert tool.draw_cell(np.array([[12.0, 0], [12, 9], [19, 9], [19, 0]])) == 5  # each outline a new cell
         QApplication.processEvents()
         # Left click in draw mode, move (no button held), back to the start: the outline closes by itself.
@@ -92,10 +110,11 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         tool.cells[1].mark(af.UNREVIEWED)
         viewer.reset_view()
         tool.all_in_view_ok()  # the whole image is in view
-        assert tool.cells[1] == af.Cell(af.OK, af.PROPOSED, False, af.BULK)
+        assert tool.cells[1] == af.Cell(af.OK, af.PROPOSED, af.BULK)
         assert tool.cells[4].ok_by == af.HAND  # already OK: left as it was
 
         tool.folders = [train_folder, test_folder]
+        tool.press_done()  # every cell OK: done, so the next image opens
         tool.go(1)
         assert tool.test_mode and tool.masks.name == "masks (from scratch)" and tool.masks.data.max() == 0
         assert viewer.layers["DAPI"].colormap.name == "blue"  # colours from annotation.json
@@ -103,10 +122,8 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         assert "model_a" not in [layer.name for layer in viewer.layers]  # no masks shown in test mode
         tool.draw_cell(np.array([[2.0, 2], [2, 8], [8, 8], [8, 2]]))
         QApplication.processEvents()
-        viewer.cursor.position = (5, 5)
-        tool.toggle_macrophage()
         tool.go(-1)  # saves the test patch
-        assert af.read_cells(test_folder) == {1: af.Cell(af.OK, af.DRAWN, True, af.HAND)}
+        assert af.read_cells(test_folder) == {1: af.Cell(af.OK, af.DRAWN, af.HAND)}
     finally:
         viewer.close()
 
@@ -259,6 +276,99 @@ def test_closed_roi_is_read_only(train_folder):
         viewer.close()
 
 
+def test_done_needs_every_cell_ok(train_folder, monkeypatch):
+    from annocell import app
+    from annocell.app import Annotator
+
+    messages = []
+    monkeypatch.setattr(app, "_message", lambda text, parent=None: messages.append(text))
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        tool.press_done()  # 3 cells not checked: refused, with a message
+        assert not tool.done and "still 3 cells not OK" in messages[-1]
+        assert not af.is_complete(af.read_review(train_folder))
+        viewer.reset_view()
+        tool.all_in_view_ok()
+        assert "press <b>Done</b>" in _panel(tool) and not tool.done
+        tool.press_done()
+        assert tool.done and len(messages) == 1 and "<b>Done</b>" in _panel(tool)
+        assert af.is_complete(af.read_review(train_folder))
+        tool.all_in_view_ok()  # nothing left to mark: not a change, still done
+        assert tool.done
+        tool.delete_at((5, 5))  # a change after Done takes it back
+        tool._on_paint()
+        tool.save()
+        assert not tool.done and not af.is_complete(af.read_review(train_folder))
+        tool.press_done()
+        tool.load(0)  # reopened: still done
+        assert tool.done
+    finally:
+        viewer.close()
+
+
+def test_next_image_needs_every_cell_ok(train_folder, test_folder, monkeypatch):
+    from annocell import app
+    from annocell.app import Annotator
+
+    messages = []
+    monkeypatch.setattr(app, "_message", lambda text, parent=None: messages.append(text))
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder, test_folder], 0)
+        tool.go(1)  # 3 cells not checked: stays, with Done's message
+        assert tool.folder == train_folder and "still 3 cells not OK" in messages[-1]
+        assert "press Done and go to the next image" in messages[-1]
+        viewer.reset_view()
+        tool.all_in_view_ok()
+        tool.go(1)  # every cell OK, but Done not pressed: a warning, and it stays
+        assert tool.folder == train_folder and "not marked as done" in messages[-1]
+        tool.press_done()
+        tool.go(1)
+        assert tool.folder == test_folder and len(messages) == 2
+        tool.go(1)  # the last image: nothing past it, no message
+        tool.go(-1)  # back: never checked
+        assert tool.folder == train_folder and len(messages) == 2
+    finally:
+        viewer.close()
+
+
+def test_leaving_an_image_not_done_asks_first(train_folder, test_folder, monkeypatch):
+    from qtpy.QtGui import QCloseEvent
+    from qtpy.QtWidgets import QApplication
+
+    from annocell import app
+    from annocell.app import Annotator
+
+    questions, answer = [], [False]
+
+    def ask(text, parent=None):
+        questions.append((text, parent))
+        return answer[0]
+
+    monkeypatch.setattr(app, "_ask", ask)
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        event = QCloseEvent()
+        QApplication.sendEvent(viewer.window._qt_window, event)  # closing napari: asked, No keeps it open
+        assert not event.isAccepted() and "Close napari anyway?" in questions[-1][0]
+        assert questions[-1][1] is viewer.window._qt_window  # on top of napari's window
+        tool.open_folder(test_folder)  # No: the image stays
+        assert tool.folder == train_folder and "not marked as done" in questions[-1][0]
+        answer[0] = True
+        tool.open_folder(test_folder)
+        assert tool.folder == test_folder
+        tool.draw_cell(np.array([[2.0, 2], [2, 8], [8, 8], [8, 2]]))
+        QApplication.processEvents()
+        tool.press_done()
+        asked = len(questions)
+        tool.open_folder(train_folder)  # done: no question
+        assert tool.folder == train_folder and len(questions) == asked
+    finally:
+        viewer.close()
+
+
 def test_round_closed_while_open_turns_read_only(train_folder):
     from annocell.app import NAVIGATE, TOGGLE, Annotator
 
@@ -295,6 +405,9 @@ def test_failed_save_keeps_the_changes_and_tries_again(train_folder, test_folder
 
         monkeypatch.setattr(af, "save", unreachable)
         assert not tool.save() and tool.dirty and "Not saved" in _panel(tool)
+        viewer.reset_view()
+        tool.all_in_view_ok()  # every cell OK and done: only the failed save keeps the image open
+        tool.press_done()
         tool.go(1)  # not saved: the image stays open
         assert tool.folder == train_folder and tool.cells[1].state == af.OK
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")

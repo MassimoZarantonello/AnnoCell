@@ -52,12 +52,11 @@ def test_save_writes_masks_cells_and_review(train_folder):
     masks[masks == 3] = 0  # deleted
     masks[12:20, 20:30] = 4  # drawn
     cells = af.sync_cells({}, masks, af.read_start(train_folder))
-    cells[1].macrophage = True
     af.save(train_folder, masks, cells)
     np.testing.assert_array_equal(af.read_masks(train_folder), masks)
     assert af.read_cells(train_folder) == cells
     review = af.read_review(train_folder)
-    assert (review["cells"], review[af.UNREVIEWED], review[af.DRAWN], review["macrophages"]) == (3, 2, 1, 1)
+    assert (review["cells"], review[af.UNREVIEWED], review[af.DRAWN]) == (3, 2, 1)
     assert "review" not in af.read_record(train_folder)  # annotation.json is the pipeline's: never written here
     assert not list(train_folder.glob(".*.tmp"))  # no temporary file left behind
 
@@ -99,17 +98,21 @@ def test_complete_and_closed(train_folder):
     for cell in cells.values():
         cell.state = af.OK
     af.save(train_folder, masks, cells)
+    assert not af.is_complete(af.read_review(train_folder))  # every cell OK, but Done not pressed
+    af.save(train_folder, masks, cells, done=True)
     review = af.read_review(train_folder)
-    assert af.is_complete(af.read_review(train_folder)) and review["completed_at"] and review["started_at"]
+    assert af.is_complete(review) and review["completed_at"] and review["started_at"]
     started, completed = review["started_at"], review["completed_at"]
-    af.save(train_folder, masks, cells)  # saved again: both moments kept
+    af.save(train_folder, masks, cells, done=True)  # saved again: both moments kept
     assert af.read_review(train_folder)["completed_at"] == completed
-    cells[1].state = af.UNREVIEWED
-    af.save(train_folder, masks, cells)  # a cell unchecked again: no longer finished, still started
+    af.save(train_folder, masks, cells)  # a change after Done: no longer finished, still started
     review = af.read_review(train_folder)
     assert review["completed_at"] is None and review["started_at"] == started
+    cells[1].state = af.UNREVIEWED
+    af.save(train_folder, masks, cells, done=True)  # Done with a cell not checked: not finished
+    assert not af.is_complete(af.read_review(train_folder))
     cells[1].state = af.OK
-    af.save(train_folder, masks, cells)
+    af.save(train_folder, masks, cells, done=True)
     af.close(train_folder, date(2026, 11, 2))
     record = af.read_record(train_folder)
     assert af.is_closed(record) and record["closed_on"] == "2026-11-02"
@@ -137,7 +140,7 @@ def test_how_cells_became_ok(train_folder):
     masks = start.copy()
     masks[12:20, 20:30] = 4  # drawn: OK by hand
     cells = af.sync_cells({}, masks, start)
-    assert cells[4] == af.Cell(af.OK, af.DRAWN, False, af.HAND) and cells[1].ok_by == ""
+    assert cells[4] == af.Cell(af.OK, af.DRAWN, af.HAND) and cells[1].ok_by == ""
     cells[1].mark(af.OK, af.BULK)
     cells[2].mark(af.OK)  # by hand
     af.save(train_folder, masks, cells)

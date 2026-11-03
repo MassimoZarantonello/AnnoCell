@@ -15,8 +15,8 @@ One folder per image (an ROI), self-contained so that it can be copied to the an
   model was trained on this image;
 - ``masks.tif``: the current masks (uint32 labels), written by the tool;
 - ``cells.csv``: one row per cell of ``masks.tif``: ``cell_ID``, ``state`` (``unreviewed`` / ``ok``),
-  ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks), ``macrophage``
-  (0 / 1, test mode only) and ``ok_by`` (how an OK cell became OK: ``hand`` or ``bulk``, empty while unreviewed);
+  ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks) and ``ok_by`` (how an
+  OK cell became OK: ``hand`` or ``bulk``, empty while unreviewed);
 - ``annotation.json``: where it all comes from, written by the pipeline (AnnoLoop) only, never by the tool;
   ``format_version`` is the version of this layout (``FORMAT_VERSION``);
 - ``review.json``: the review summary, written by the tool only, at every save (``read_review``).
@@ -31,10 +31,11 @@ One writer per file, so that the pipeline and the tool can never overwrite each 
 - written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only, and stops saving if
   it had it open.
 
-``review.json`` (``save``): the counts of ``summary`` (cells, OK, unreviewed, by origin, OK by hand / in bulk,
-macrophages), ``saved_at``, ``started_at`` (the first save, i.e. the first change), ``completed_at`` (when the last
-cell was checked, None while some are not), ``start_cells`` and ``deleted`` (the proposal's cells, and those
-deleted entirely); ``is_complete`` reads it. These counts are the one definition of kept / edited / deleted / drawn.
+``review.json`` (``save``): the counts of ``summary`` (cells, OK, unreviewed, by origin, OK by hand / in bulk),
+``saved_at``, ``started_at`` (the first save, i.e. the first change), ``completed_at`` (when the annotator
+pressed Done with every cell OK; None before, and again after any change), ``start_cells`` and ``deleted`` (the
+proposal's cells, and those deleted entirely); ``is_complete`` reads it. These counts are the one definition of
+kept / edited / deleted / drawn.
 
 Next to the annotators' folders, ``<root>/scores/<model>.json``: each model's score on the test regions
 (``write_score``, ``read_scores``), written by the pipeline.
@@ -84,11 +85,10 @@ HAND, BULK = "hand", "bulk"
 
 @dataclass
 class Cell:
-    """One row of ``cells.csv``: review state, origin, (test mode) macrophage mark, and how it became OK."""
+    """One row of ``cells.csv``: review state, origin, and how it became OK."""
 
     state: str = UNREVIEWED
     origin: str = PROPOSED
-    macrophage: bool = False
     ok_by: str = ""  # HAND or BULK when OK; empty while unreviewed
 
     def mark(self, state: str, by: str = HAND) -> None:
@@ -117,13 +117,9 @@ def read_review(folder: str | Path) -> dict:
 
 
 def is_complete(review: Mapping) -> bool:
-    """Every cell checked (at least one cell, none unreviewed) at the last save: what training takes. ``review``:
-    from ``read_review``.
-
-    For a test region (drawn from scratch, every drawn cell OK) it only says that cells were drawn, not that the
-    drawing is finished.
-    """
-    return review.get("cells", 0) > 0 and review.get(UNREVIEWED, 1) == 0
+    """Done: the annotator pressed Done with every cell OK (at least one cell, none unreviewed), and changed nothing
+    since. What training takes, and the end of a test region's drawing. ``review``: from ``read_review``."""
+    return bool(review.get("completed_at")) and review.get("cells", 0) > 0 and review.get(UNREVIEWED, 1) == 0
 
 
 def close(folder: str | Path, on: date | None = None) -> None:
@@ -226,18 +222,15 @@ def read_cells(folder: str | Path) -> dict[int, Cell]:
     if not path.exists():
         return {}
     with path.open(newline="") as f:
-        return {
-            int(row["cell_ID"]): Cell(row["state"], row["origin"], row.get("macrophage", "0") == "1", row["ok_by"])
-            for row in csv.DictReader(f)
-        }
+        return {int(row["cell_ID"]): Cell(row["state"], row["origin"], row["ok_by"]) for row in csv.DictReader(f)}
 
 
 def write_cells(folder: str | Path, cells: Mapping[int, Cell]) -> None:
-    """Write the review table, one row per cell sorted by ID; ``macrophage`` as 0 / 1."""
+    """Write the review table, one row per cell sorted by ID."""
 
     def write(f):
-        lines = ["cell_ID,state,origin,macrophage,ok_by"]
-        lines += [f"{i},{c.state},{c.origin},{int(c.macrophage)},{c.ok_by}" for i, c in sorted(cells.items())]
+        lines = ["cell_ID,state,origin,ok_by"]
+        lines += [f"{i},{c.state},{c.origin},{c.ok_by}" for i, c in sorted(cells.items())]
         f.write(("\n".join(lines) + "\n").encode())
 
     _write_atomic(Path(folder) / CELLS, write)
@@ -273,14 +266,14 @@ def sync_cells(cells: Mapping[int, Cell], masks: np.ndarray, start: np.ndarray) 
     """
     synced = {}
     for i, origin in origins(masks, start).items():
-        # A known cell keeps its state, macrophage mark and ok_by; only its origin is updated.
+        # A known cell keeps its state and ok_by; only its origin is updated.
         cell = cells.get(i) or (Cell(UNREVIEWED) if origin == PROPOSED else Cell(OK, ok_by=HAND))
-        synced[i] = Cell(cell.state, origin, cell.macrophage, cell.ok_by)
+        synced[i] = Cell(cell.state, origin, cell.ok_by)
     return synced
 
 
 def summary(cells: Mapping[int, Cell]) -> dict:
-    """Counts of the review: cells, OK, unreviewed, OK by hand and in bulk, by origin, macrophages."""
+    """Counts of the review: cells, OK, unreviewed, OK by hand and in bulk, by origin."""
     values = list(cells.values())
     return {
         "cells": len(values),
@@ -288,15 +281,21 @@ def summary(cells: Mapping[int, Cell]) -> dict:
         UNREVIEWED: sum(c.state == UNREVIEWED for c in values),
         **{f"ok_{by}": sum(c.state == OK and c.ok_by == by for c in values) for by in (HAND, BULK)},
         **{origin: sum(c.origin == origin for c in values) for origin in (PROPOSED, EDITED, DRAWN)},
-        "macrophages": sum(c.macrophage for c in values),
     }
 
 
-def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell], start: np.ndarray | None = None) -> None:
+def save(
+    folder: str | Path,
+    masks: np.ndarray,
+    cells: Mapping[int, Cell],
+    start: np.ndarray | None = None,
+    done: bool = False,
+) -> None:
     """Write the masks, the cell table and the review summary (``review.json``); ``annotation.json`` is not touched.
 
-    The review keeps when the annotator started (the first save) and when they finished (the save at which no cell
-    was left unreviewed; cleared if a cell is unchecked again). Not how long they worked: only these two moments.
+    The review keeps when the annotator started (the first save) and when they finished (``done``: they pressed Done
+    and every cell is OK; the first such save is kept, and a save without ``done`` clears it). Not how long they
+    worked: only these two moments.
     It also counts the proposal's cells (``start_cells``) and those deleted (``deleted``: gone entirely; a cell that
     lost pixels is edited): with ``proposed`` (kept) and ``edited``, how much of the proposal had to be fixed.
     ``start``: the proposal, read from the folder if not given (empty in test mode).
@@ -310,7 +309,7 @@ def save(folder: str | Path, masks: np.ndarray, cells: Mapping[int, Cell], start
     proposed = np.unique(start[start > 0])
     review["start_cells"] = int(len(proposed))
     review["deleted"] = int(len(np.setdiff1d(proposed, np.unique(masks[masks > 0]))))
-    done = review["cells"] > 0 and review[UNREVIEWED] == 0
+    done = done and review["cells"] > 0 and review[UNREVIEWED] == 0
     review["completed_at"] = (previous.get("completed_at") or now) if done else None
     _write_json(Path(folder) / REVIEW, review)
 

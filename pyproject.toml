@@ -17,7 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 # The napari tool, for the annotator.
 gui = [
-  "napari[pyqt6]>=0.5",
+  # Pinned: the tool switches napari's labels keys off by name (app.NAPARI_KEYS); check them before moving on.
+  "napari[pyqt6]==0.9.2",
   "scipy",
 ]
 dev = [

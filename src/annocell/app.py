@@ -1,14 +1,14 @@
 """The napari annotation tool: ``annocell <folder>``.
 
 ``<folder>`` is the annotator's own folder (the tool opens their latest round that is not closed), a round (or
-test) folder, or one image folder; the tool opens the first image with cells left to review and moves through the
+test) folder, or one image folder; the tool opens the first image not done yet and moves through the
 others of the same round with Previous / Next. Without ``<folder>`` it opens empty, and the panel's "Open folder"
 button picks one. An ROI of a closed round (``closed_on``) opens read-only: it can be looked at, not changed; a
 round closed while one of its ROIs is open turns it read-only at the next save.
 
 Layers: every channel of the image (napari's own controls) and the editable masks (``masks (from <segmentation>)``),
-outlined in yellow (unreviewed) or green (OK); in test mode, magenta marks macrophages. Read-only comparison masks
-of other segmentations are added to the layer list only on request (a checkbox), hidden.
+outlined in yellow (unreviewed) or green (OK). Read-only comparison masks of other segmentations are added to the
+layer list only on request (a checkbox), hidden.
 
 New cell: right click (in any mode), or left click in draw mode (``N``), then move around the cell with no button
 held: the outline follows the mouse, as in the Cellpose GUI. It closes when the mouse comes back to the start, or
@@ -25,11 +25,15 @@ Modes (keys; the same key again, or ``Esc``, back to navigating):
 Keys on the cell under the mouse:
 
 - ``Shift+O``: mark every unreviewed cell entirely in view OK (``ok_by`` bulk; every other way to OK a cell is by
-  hand);
-- ``Shift+M``: macrophage on / off (test mode only).
+  hand).
 
-napari's own editing tools (brush, eraser, fill, polygon, picker) are hidden and switched off: a wrong outline is
-deleted and drawn again.
+napari's own editing tools (brush, eraser, fill, polygon, picker) are there, as buttons only: their keys (P, E, F,
+L, 1 to 7, M, ...) do nothing (``NAPARI_KEYS``), so a key pressed by mistake never changes the masks. Picking one of
+them leaves the tool's mode.
+
+**Done**: a button. The annotator presses it when every cell is OK; with cells still not checked, a message says
+how many, and nothing is marked. Any change after Done takes it back: press it again. "Image >" goes on only from
+an image done (no skipping); closing napari or opening another folder with an image not done asks first.
 
 The masks are saved every few seconds, when changing image and when closing napari. The folders may be on a
 network drive: a save that fails (drive unreachable) keeps everything in memory, says so in the panel, and is tried
@@ -51,17 +55,20 @@ import numpy as np
 
 from annocell import folder as af
 
-# Outline colours (RGBA) by review state; macrophages (test mode) override the state colour.
+# Outline colours (RGBA) by review state.
 COLOURS = {
     af.UNREVIEWED: (1.0, 0.85, 0.0, 1.0),
     af.OK: (0.1, 0.9, 0.3, 1.0),
-    "macrophage": (1.0, 0.2, 1.0, 1.0),
 }
+WARNING = (1.0, 0.2, 1.0, 1.0)  # "Not saved" in the panel
 CHANNEL_COLORMAPS = ("red", "green", "blue")  # channels without a colour in annotation.json, in turn
 SAVE_EVERY_MS = 3000
 MIN_CELL_PX = 10  # a smaller outline is a slip, not a cell
 NAVIGATE, DRAW, DELETE, TOGGLE = "navigate", "draw", "delete", "toggle"
 CLOSE_SCREEN_PX = 8  # an outline closes when the mouse comes back this close to its start
+# napari's keys on a labels layer (napari 0.9: tools, label IDs, brush size), switched off on the masks layer; undo,
+# redo, Escape (bound by the tool) and Enter (closes napari's polygon) stay.
+NAPARI_KEYS = ("1", "2", "3", "4", "5", "6", "7", "E", "P", "F", "L", "Z", "M", "X", "B", "-", "=", "[", "]")
 
 
 class Annotator:
@@ -77,6 +84,7 @@ class Annotator:
     - ``next_id``: the ID of the next drawn cell, never reusing an ID of the start masks;
     - ``mode``: navigate, draw, delete or OK; ``drawing``: the outline being drawn, or None;
     - ``read_only``: the ROI's round is closed (when opened, or since): nothing can be changed or saved;
+    - ``done``: the annotator pressed Done (every cell OK) and changed nothing since;
     - ``save_error``: why the last save failed (e.g. the network drive unreachable), or None.
 
     With no folder open (``folders`` empty), ``masks`` is None and the keys, buttons, mouse and autosave do nothing.
@@ -89,19 +97,27 @@ class Annotator:
         self.folders = list(folders or [])
         self.masks = None  # no image open yet
         self.folder, self.index, self.cells, self.test_mode = None, 0, {}, False
-        self.record, self.read_only, self.save_error = {}, False, None
+        self.record, self.read_only, self.save_error, self.done = {}, False, None, False
         self.mode = NAVIGATE
         self.drawing = None  # the outline being drawn, (y, x) points
         self.show_compare = False  # kept when moving to the next image
         self.widget = _Widget(self)
         viewer.window.add_dock_widget(self.widget, name="Annotation", area="right")
         self._bind_keys()
+        # Closing napari with an image not done asks first (kept here: Qt does not keep the filter alive).
+        self._close_guard = _close_guard(self)
+        if (window := self._window()) is not None:
+            window.installEventFilter(self._close_guard)
         # On the viewer, not on a layer: they run whatever layer is selected, before the layer's own callbacks.
         viewer.mouse_drag_callbacks.append(self._on_mouse)
         viewer.mouse_move_callbacks.append(self._on_move)
         self.timer = QTimer()
         self.timer.timeout.connect(self.autosave)
         self.timer.start(SAVE_EVERY_MS)
+        # napari closed: its panel is destroyed. No autosave after that, and a paint handler still queued does nothing
+        # (it would update labels that no longer exist).
+        self.closed = False
+        self.widget.destroyed.connect(self._on_closed)
         if self.folders:
             self.load(index)
         else:
@@ -121,6 +137,8 @@ class Annotator:
             from napari.utils.notifications import show_error
 
             show_error(str(error))
+            return
+        if not self.may_leave("Open the other folder anyway?"):
             return
         if self.is_open and not self.save():
             _cannot_leave()
@@ -144,6 +162,7 @@ class Annotator:
         self.start = af.read_start(self.folder, shape)
         masks = af.read_masks(self.folder, shape)  # the saved corrections, else the proposal
         self.cells = af.sync_cells(af.read_cells(self.folder), masks, self.start)
+        self.done = af.is_complete(af.read_review(self.folder))
         self.next_id = int(max(masks.max(), self.start.max())) + 1
 
         self.viewer.layers.clear()
@@ -169,11 +188,14 @@ class Annotator:
         self.masks.editable = not self.read_only
         self.masks.contour = 1  # outlines only, so the channels stay visible inside the cells
         self.masks.show_selected_label = False
+        self.masks.selected_label = self.next_id  # napari's brush starts a new cell, not cell 1
         # napari emits ``paint`` before writing the new pixels: look at them once the event is over.
         self.masks.events.paint.connect(lambda event: QTimer.singleShot(0, self._on_paint))
         self.masks.events.mode.connect(self._on_napari_mode)
-        self._hide_napari_tools()
-        # napari's own Esc on a labels layer (cancel its polygon) wins over the viewer's: bind it on the layer.
+        # Keys bound on the layer win over napari's own (its class keymap): no-ops, and our Esc. napari's own Esc on
+        # a labels layer (cancel its polygon) would also win over the viewer's.
+        for key in NAPARI_KEYS:
+            self.masks.bind_key(key, lambda layer: None, overwrite=True)
         self.masks.bind_key("Escape", lambda layer: self.escape(), overwrite=True)
         self.set_compare(self.show_compare)
         self.set_mode(self.mode)
@@ -185,9 +207,19 @@ class Annotator:
         self.refresh()
 
     def go(self, step: int) -> None:
-        """Save, then open the previous (``-1``) or next (``1``) image; nothing past the first or last."""
+        """Save, then open the previous (``-1``) or next (``1``) image; nothing past the first or last. The next image
+        only once this one is done: with cells not OK, Done's message (how many are left); with every cell OK but
+        Done not pressed, a warning to press it. A read-only image does not stop anyone, nor does going back."""
         index = self.index + step
         if not (self.is_open and 0 <= index < len(self.folders)):
+            return
+        if step > 0 and not self.read_only and not self.done:
+            problem = self._not_finished()
+            self._tell(
+                problem.replace("press Done", "press Done and go to the next image")
+                if problem
+                else "This image is not marked as done: press Done, then go to the next image."
+            )
             return
         if not self.save():
             _cannot_leave()
@@ -235,19 +267,10 @@ class Annotator:
         self.set_mode(NAVIGATE if self.mode == mode else mode)
 
     def _on_napari_mode(self, event=None) -> None:
-        """napari's brush, eraser, fill, ... are not used: their keys (P, E, F, 1 to 5) leave the masks as they are."""
-        if self.masks.mode != "pan_zoom":
-            self.masks.mode = "pan_zoom"
-
-    def _hide_napari_tools(self) -> None:
-        """Hide the brush, eraser, fill, polygon and picker buttons of the masks layer (napari internals: if they
-        change, the buttons stay, and ``_on_napari_mode`` still switches the tools off)."""
-        try:
-            controls = self.viewer.window._qt_viewer.controls.widgets[self.masks]
-            for name in ("paint_button", "erase_button", "fill_button", "polygon_button", "pick_button"):
-                getattr(controls, name).hide()
-        except (AttributeError, KeyError):
-            pass
+        """A napari tool (brush, eraser, fill, ...) picked from its buttons: back to navigating, so that a click does
+        not both paint and delete or mark."""
+        if self.masks.mode != "pan_zoom" and self.mode != NAVIGATE:
+            self.set_mode(NAVIGATE)
 
     # Mouse: drawing and deleting
 
@@ -342,6 +365,8 @@ class Annotator:
         # napari fills the polygon over whatever is there (the cells under it lose those pixels) and records it
         # for undo; its ``paint`` event then updates the cell table (``_on_paint``).
         self.masks.paint_polygon(path, cell)
+        if self.masks.selected_label == cell:  # napari's brush must not add to this cell: on to a new one
+            self.masks.selected_label = self.next_id
         return cell
 
     def delete_at(self, point) -> None:
@@ -385,17 +410,53 @@ class Annotator:
             return
         # ``corner_pixels``: the first and last visible pixel of the layer, (y, x), as napari last drew it.
         (y0, x0), (y1, x1) = np.asarray(self.masks.corner_pixels, dtype=int)[:, -2:]
-        for cell in af.ids_inside(self.masks.data, y0, y1 + 1, x0, x1 + 1):
-            if cell in self.cells and self.cells[cell].state == af.UNREVIEWED:
-                self.cells[cell].mark(af.OK, af.BULK)
-        self.changed()
-
-    def toggle_macrophage(self) -> None:
-        """``Shift+M``, test mode only: the cell under the mouse is a macrophage, or no longer."""
-        cell = self.cell_under_cursor()
-        if self.test_mode and not self.read_only and cell and cell in self.cells:
-            self.cells[cell].macrophage = not self.cells[cell].macrophage
+        marked = [c for c in af.ids_inside(self.masks.data, y0, y1 + 1, x0, x1 + 1) if c in self.cells]
+        marked = [c for c in marked if self.cells[c].state == af.UNREVIEWED]
+        for cell in marked:
+            self.cells[cell].mark(af.OK, af.BULK)
+        if marked:  # nothing to mark is not a change (and does not take Done back)
             self.changed()
+
+    def press_done(self) -> None:
+        """The Done button: the image is finished, if every cell is OK; else a message says how many are left."""
+        if self.read_only:
+            return
+        if problem := self._not_finished():
+            self._tell(problem)
+            return
+        self.done, self.dirty = True, True
+        self.save()
+        self.widget.update_status()
+
+    def may_leave(self, question: str) -> bool:
+        """Before closing napari or opening another folder: an image not done asks ``question`` first (it would stay
+        out of training, e.g. Done taken back by a late fix and not pressed again). True: go ahead."""
+        if not self.is_open or self.read_only or self.done:
+            return True
+        return _ask(
+            f"This image is not marked as done: it stays out of training until you press Done. {question}",
+            self._window(),
+        )
+
+    def _tell(self, text: str) -> None:
+        _message(text, self._window())
+
+    def _window(self):
+        """napari's main window (napari internals: None if that changes), so that messages open on top of it."""
+        return getattr(self.viewer.window, "_qt_window", None)
+
+    def _not_finished(self) -> str | None:
+        """Why this image is not finished (no cells, or cells not OK), for the annotator; None if every cell is OK."""
+        counts = af.summary(self.cells)
+        if not counts["cells"]:
+            return "There are no cells yet: draw them, then press Done."
+        left = counts[af.UNREVIEWED]
+        if left:
+            return (
+                f"There {'is' if left == 1 else 'are'} still {left} cell{'' if left == 1 else 's'} not OK. Mark "
+                "them OK (or delete them), then press Done; Next unchecked cell takes you to them."
+            )
+        return None
 
     def next_unreviewed(self) -> None:
         """Centre the view on the unreviewed cell closest to the current centre."""
@@ -408,18 +469,21 @@ class Annotator:
         here = np.asarray(self.viewer.camera.center[-2:])
         self.viewer.camera.center = tuple(centres[np.argmin(((centres - here) ** 2).sum(axis=1))])
 
-    def cell_under_cursor(self) -> int:
-        return self._cell_at(self._data_point(self.viewer.cursor.position))
-
     def _cell_at(self, point) -> int:
         """The cell ID at ``point`` ((y, x) in pixels); 0 for background or outside the image."""
         y, x = np.round(point).astype(int)
         height, width = self.masks.data.shape
         return int(self.masks.data[y, x]) if 0 <= y < height and 0 <= x < width else 0
 
+    def _on_closed(self, *args) -> None:
+        self.closed = True
+        self.timer.stop()
+
     def _on_paint(self) -> None:
         """After an outline, a delete, an undo or redo: the cells that gained pixels are OK (by hand), and so are
         those trimmed to background; cells that only lost pixels to a new cell keep their state."""
+        if self.closed:
+            return
         data = self.masks.data
         diff = data != self.snapshot  # the pixels this edit changed
         gained = set(np.unique(data[diff]).tolist()) - {0}
@@ -435,8 +499,8 @@ class Annotator:
     # Display and saving
 
     def changed(self) -> None:
-        """Something to save: recolour the outlines and update the panel."""
-        self.dirty = True
+        """Something to save: recolour the outlines and update the panel. It takes Done back."""
+        self.dirty, self.done = True, False
         self.refresh()
 
     def refresh(self) -> None:
@@ -446,7 +510,7 @@ class Annotator:
         # One colour per cell ID; ``None`` is the colour of IDs not in the table (none, normally), 0 the background.
         colours = {None: COLOURS[af.UNREVIEWED], 0: (0, 0, 0, 0)}
         for i, cell in self.cells.items():
-            colours[i] = COLOURS["macrophage"] if cell.macrophage else COLOURS[cell.state]
+            colours[i] = COLOURS[cell.state]
         self.masks.colormap = DirectLabelColormap(color_dict=colours)
         self.widget.update_status()
 
@@ -484,7 +548,7 @@ class Annotator:
             if af.is_closed(record):
                 self._closed_meanwhile(record)
                 return True
-            af.save(self.folder, data, self.cells, self.start)
+            af.save(self.folder, data, self.cells, self.start, self.done)
         except OSError as error:
             if self.save_error is None:
                 show_warning(f"Not saved ({error}). Your changes are kept; trying again every few seconds.")
@@ -515,7 +579,7 @@ class Annotator:
         ``~/AnnoCell unsaved/<annotator>_<round>_<image>/``, to be copied back into the image folder."""
         folder = Path.home() / "AnnoCell unsaved" / "_".join(self.folder.parts[-3:])
         af.write_record(folder, self.record)
-        af.save(folder, self.masks.data, self.cells, self.start)
+        af.save(folder, self.masks.data, self.cells, self.start, self.done)
         return folder
 
     def _bind_keys(self) -> None:
@@ -527,7 +591,6 @@ class Annotator:
             "Escape": self.escape,
             "o": lambda: self.toggle_mode(TOGGLE),
             "Shift-O": self.all_in_view_ok,
-            "Shift-M": self.toggle_macrophage,
         }
         for key, action in actions.items():
             # Nothing to act on before a folder is open.
@@ -570,7 +633,6 @@ class _Widget:
                 [
                     swatch(af.UNREVIEWED, "not checked"),
                     swatch(af.OK, "OK"),
-                    swatch("macrophage", "macrophage (test)"),
                 ]
             )
         )
@@ -579,6 +641,7 @@ class _Widget:
         for text, action in (
             ("All in view OK", annotator.all_in_view_ok),
             ("Next unchecked cell", annotator.next_unreviewed),
+            ("Done", annotator.press_done),
         ):
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, action=action: annotator.is_open and action())
@@ -604,10 +667,8 @@ class _Widget:
             "<tr><td>Esc</td><td>drop outline / leave mode</td></tr>"
             "<tr><td>O</td><td>OK mode: click or drag to mark OK / not checked</td></tr>"
             "<tr><td>Shift+O&nbsp;</td><td>all in view OK</td></tr>"
-            "<tr><td>Shift+M</td><td>macrophage (test)</td></tr>"
-            "<tr><td></td><td>wrong outline: delete, redraw</td></tr>"
             "<tr><td>Cmd+Z&nbsp;</td><td>undo (Ctrl+Z on Windows)</td></tr>"
-            "</table>Saved automatically."
+            "</table>napari's brush, eraser and fill: their buttons, no keys. Saved automatically."
         )
         keys.setWordWrap(True)
         layout.addWidget(keys)
@@ -631,12 +692,12 @@ class _Widget:
             text = f"{counts['cells']} cells: {counts[af.OK]} OK, {counts[af.UNREVIEWED]} not checked"
             if annotator.read_only:
                 text = f"<b>{where.capitalize() or 'Round'} closed: read-only</b><br>{text}"
-            if annotator.test_mode:
-                text += f"<br>{counts['macrophages']} macrophages"
-            elif counts["cells"] and not counts[af.UNREVIEWED]:
-                text += "<br><b>Complete</b>"  # every cell checked: untouched cells now count as correct
+            if annotator.done:
+                text += "<br><b>Done</b>"  # every cell checked: untouched cells now count as correct
+            elif counts["cells"] and not counts[af.UNREVIEWED] and not annotator.read_only:
+                text += "<br>Every cell OK: press <b>Done</b> when finished."
             if annotator.save_error is not None:
-                text += f"<br><b style='color:{_hex(COLOURS['macrophage'])}'>Not saved: folder unreachable.</b> "
+                text += f"<br><b style='color:{_hex(WARNING)}'>Not saved: folder unreachable.</b> "
                 text += "Your changes are kept; trying again every few seconds."
             status.setText(text)
 
@@ -666,6 +727,36 @@ def _polygon_area(path: np.ndarray) -> float:
     return 0.5 * abs(float(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
 
 
+def _message(text: str, parent=None) -> None:
+    """A message the annotator has to close (Done or the next image refused), on top of ``parent``."""
+    from qtpy.QtWidgets import QMessageBox
+
+    QMessageBox.information(parent, "AnnoCell", text)
+
+
+def _ask(text: str, parent=None) -> bool:
+    """A yes / no question on top of ``parent``; No is the default (Enter does not leave by accident)."""
+    from qtpy.QtWidgets import QMessageBox
+
+    buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    answer = QMessageBox.question(parent, "AnnoCell", text, buttons, QMessageBox.StandardButton.No)
+    return answer == QMessageBox.StandardButton.Yes
+
+
+def _close_guard(annotator: Annotator):
+    """An event filter for napari's window: closing it with an image not done asks first, and No keeps it open."""
+    from qtpy.QtCore import QEvent, QObject
+
+    class CloseGuard(QObject):
+        def eventFilter(self, watched, event) -> bool:
+            if event.type() == QEvent.Type.Close and not annotator.may_leave("Close napari anyway?"):
+                event.ignore()
+                return True  # handled: napari does not close
+            return False
+
+    return CloseGuard()
+
+
 def _cannot_leave() -> None:
     from napari.utils.notifications import show_error
 
@@ -674,8 +765,7 @@ def _cannot_leave() -> None:
 
 def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
     """The image folders to move through and the one to open first: ``path`` itself among its siblings, or the
-    first image of ``path`` (a round or test folder, or the round an annotator's folder opens) with cells left to
-    review."""
+    first image of ``path`` (a round or test folder, or the round an annotator's folder opens) not done yet."""
     path = Path(path)
     single = (path / af.RECORD).exists()
     if not single and not af.image_folders(path):
@@ -688,8 +778,7 @@ def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
         )
     if single:
         return folders, folders.index(path)
-    # An image never opened has no review yet: it counts as having cells left (default 1).
-    pending = [i for i, f in enumerate(folders) if af.read_review(f).get(af.UNREVIEWED, 1) > 0]
+    pending = [i for i, f in enumerate(folders) if not af.is_complete(af.read_review(f))]
     return folders, pending[0] if pending else 0
 
 

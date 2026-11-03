@@ -32,8 +32,9 @@ Three verbs, three owners:
 - **closing** a round (`close_round(root, n)` in AnnoLoop, which calls `annocell.folder.close` on each ROI) writes
   `closed_on` in `annotation.json`: the round is over, its ROIs open read-only from then on, and AnnoLoop refuses to
   export into it. Nothing else changes: the masks and the review stay as the annotator left them;
-- **complete** (`annocell.folder.is_complete`) is not a step but a test on the review: at least one cell and none
-  unreviewed. Training takes the complete ROIs, closed or not;
+- **done** (complete, `annocell.folder.is_complete`) is the annotator's: they press **Done** when every cell is OK
+  (at least one cell, none unreviewed), and the review records it (`completed_at`). Any change afterwards takes it
+  back. Training takes the done ROIs, closed or not; for a test region it is the end of the drawing;
 - **finishing** an ROI (`finish(folder)` in AnnoLoop, optional) writes in `annotation.json` its `status`
   (`complete` / `partial`) and `start_score`, the score of the proposal against the corrections. It does not count
   the corrections: those are AnnoCell's review.
@@ -45,8 +46,8 @@ checked. **The focus is segmentation, not classification**: the tool says whethe
 not what the cell is.
 
 Why a new tool: the Cellpose GUI cannot mark a cell as checked, so "untouched = correct" is an assumption,
-not data; and it shows at most 3 channels. (Fixing an outline is still delete and redraw, as in Cellpose: the
-brush and eraser were tried and dropped.)
+not data; and it shows at most 3 channels. (Fixing an outline is delete and redraw, as in Cellpose; napari's brush
+and eraser are there too, without their keys.)
 
 ## Users and setting
 
@@ -85,21 +86,23 @@ draw with the space bar to pan (losing the plain drag to pan was worse).
 |---|---|---|
 | Draw a cell | right click (any mode; or left click in draw mode), move around the cell with no button held (the outline follows the mouse, as in the Cellpose GUI); it closes back at the start or with a second click; `Esc` drops it | new cell; it takes the pixels it covers from overlapping cells, whose remainders stay; each outline is a new cell. napari's point-by-point polygon was too slow, and holding the button down was tiring |
 | Delete a cell | delete mode (`D`): click it, or drag over several | cells removed; a drag is one undo step |
-| Fix an outline | delete it (`D`) and draw it again | napari's brush, eraser, fill, polygon and picker are hidden and switched off (decided after trying them: they made it easy to damage the masks by accident) |
+| Fix an outline | delete it (`D`) and draw it again, or napari's brush, eraser, fill, polygon and picker | napari's tools from their **buttons only**: their keys (`P`, `E`, `F`, `L`, `1`–`7`, `M`, `-`, `=`, `[`, `]`, ...) are switched off, since a key pressed by mistake damaged the masks (decided after trying them). Picking a napari tool leaves draw, delete and OK mode; the brush always starts a new cell (after an outline too) |
 | Mark OK | OK mode (`O`): click a cell, or drag over several | the outline is right; a stroke starting on an OK cell takes the cells back to unreviewed (the first cell decides the direction, so passing over a cell twice does not flip it back) |
 | Mark all remaining in view as OK | `Shift+O` or button | every unreviewed cell **entirely** in view becomes OK, recorded as OK **in bulk** (cells cut by the view edge are left; cells already OK keep how they became OK) |
-| Macrophage on / off | `Shift+M`, test mode only | the cell is marked as a macrophage |
 | Go to an unreviewed cell | button | centres the view on the nearest unreviewed cell (to finish an image) |
-| Next / previous image | two buttons | saves, then moves through the images of the round |
+| Done | button (no key) | the image is finished: recorded only if every cell is OK; otherwise a message says how many cells are still not OK, and nothing is recorded |
+| Leave an image not done | close napari, or Open folder | a question first ("not marked as done: it stays out of training until you press Done"), No by default. No skipping: Image > never goes past an image not done |
+| Next / previous image | two buttons | saves, then moves through the images of the round. **Next** only from an image marked done: with cells still not OK (or no cells), Done's message says how many; with every cell OK but Done not pressed, a warning asks to press it; either way the image stays open. Previous is never stopped, nor is a read-only image |
 
 Every cell is either **unreviewed** or **OK**; a drawn or edited cell is OK. A cell that only lost pixels to a new
-cell keeps its state (the annotator has not looked at it). An image is **complete** when no cell is unreviewed.
+cell keeps its state (the annotator has not looked at it). An image is **done** when the annotator pressed Done with
+no cell unreviewed, and has changed nothing since; the tool opens the first image of a round not done yet.
 
 **How a cell became OK** (`ok_by` in `cells.csv`): `hand` (marked in OK mode, edited or drawn) or `bulk` (all in view
 OK); the last action wins, and a cell taken back to unreviewed forgets it. So that an annotator may clear the easy
 cells quickly (allowed: AnnoLoop D6) while the statistics can still tell cells looked at one by one from cells
 cleared in bulk (D7). Not a monitoring of the annotator: no time, no order, only the last action per cell.
-Outlines: yellow unreviewed, green OK, magenta macrophage (test mode).
+Outlines: yellow unreviewed, green OK.
 
 `origin` (`proposed` / `edited` / `drawn`) is not tracked from the edits but recomputed against the start masks at
 every save, so undo and redo cannot leave it wrong. For training, drawn and edited cells both count as corrected by
@@ -144,13 +147,12 @@ tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, 
 - `masks.tif`: the current masks (uint32 labels). Replaces `<image>_seg.npy` of the Cellpose GUI (a pickle; the
   GUI is no longer used);
 - `cells.csv`: one row per cell: `cell_ID`, `state` (`unreviewed` / `ok`), `origin` (`proposed` / `edited` /
-  `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `macrophage` (test mode only),
-  `ok_by` (`hand` / `bulk`, empty while unreviewed);
+  `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `ok_by` (`hand` / `bulk`, empty while unreviewed);
 - `annotation.json`: written by the pipeline only: annotator, round, `mode` (`train` / `test`), provenance,
   channels, start segmentation, `closed_on` when the round is over, and what AnnoLoop's `finish` adds (`status`,
   `start_score`);
 - `review.json`: written by the tool only, at every save: the counts (cells, OK, unreviewed, OK by hand and in
-  bulk, kept / edited / drawn, `start_cells`, `deleted`, macrophages) and `saved_at`, `started_at`, `completed_at`.
+  bulk, kept / edited / drawn, `start_cells`, `deleted`) and `saved_at`, `started_at`, `completed_at`.
   The **one definition** of the correction counts: AnnoLoop and AnnOverview read them, and do not recount.
 
 **One writer per file**: the pipeline writes `annotation.json`, the tool writes `masks.tif`, `cells.csv` and
@@ -196,8 +198,9 @@ Drawn once and then fixed.
   (Exp201: outside `[2000:4048, 2000:4048]`).
 - **Fully excluded from training**: test patches never enter `training_set`, not even as Cellpose's test loss:
   AnnoLoop's `training_set` reads only the complete ROIs of the rounds, never `<annotator>/test/`.
-- **Macrophages marked by hand here only**: one key toggles a macrophage flag per cell, in test mode only. It also
-  calibrates the F4/80 rule (agreement with high F4/80 on the drawn masks, effect of autofluorescence).
+- **Macrophages are not marked by hand**, not even here: a macrophage flag in test mode was built and removed
+  (2026-11-03). On test regions too, macrophages come from the F4/80 rule on the drawn masks (see Macrophages), so
+  the AP on macrophages measures outlines, not the annotator's judgement of what a macrophage is.
 - **Drawn by the biologist**, the same person who corrects the training images (otherwise part of every score is
   the difference between two annotators' styles), and the same person for every test set.
 - **Noise ceiling**: about 50 cells redrawn by the same annotator weeks later, and by Massimo. Their agreement is the
@@ -210,7 +213,7 @@ Drawn once and then fixed.
 - Several annotators on the same ROI (blending them is the pipeline's: macroseg `docs/concurrent_annotations.md`),
   locking, time per image (decided: not measured; the review records only when an ROI was started and finished,
   `started_at` / `completed_at`).
-- Classification of cells (macrophage / other): a later phase (except the macrophage flag of test mode).
+- Classification of cells (macrophage / other): a later phase. No per-cell macrophage mark anywhere.
 
 ## Packaging and installation
 
@@ -219,6 +222,8 @@ Drawn once and then fixed.
   folder format, the contract with the pipeline: macroseg depends on it to export and read back, so the format is
   defined in one place and cannot drift; `format_version` in `annotation.json` marks the layout. The napari tool is
   the `gui` extra: a pipeline never installs napari.
+- **napari pinned** (`napari[pyqt6]==0.9.2`): the tool switches napari's labels keys off by name, so a new napari
+  version is checked (its labels keymap against `app.NAPARI_KEYS`) before the pin moves.
 - **A launcher, not a napari-menu plugin**: `annocell <round folder>` opens napari with every layer and the
   widget set up; no plugin manifest for the annotator to find.
 - **Installation with uv**: one line installs uv (Mac or Windows), then `uv tool install` from a wheel handed over
