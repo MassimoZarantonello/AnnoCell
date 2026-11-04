@@ -3,8 +3,8 @@
 ``<folder>`` is the annotator's own folder (the tool opens their latest round that is not closed), a round (or
 test) folder, or one image folder; the tool opens the first image not done yet and moves through the
 others of the same round with Previous / Next. Without ``<folder>`` it opens empty, and the panel's "Open folder"
-button picks one. An ROI of a closed round (``closed_on``) opens read-only: it can be looked at, not changed; a
-round closed while one of its ROIs is open turns it read-only at the next save.
+button picks one. An image of a closed round (``closed_on``) opens read-only: it can be looked at, not changed; a
+round closed while one of its images is open turns it read-only at the next save.
 
 Layers: every channel of the image (napari's own controls) and the editable masks (``masks (from <segmentation>)``),
 outlined in yellow (unreviewed) or green (OK). Read-only comparison masks of other segmentations are added to the
@@ -83,7 +83,7 @@ class Annotator:
     - ``saved``: the masks as last written to disk, and ``dirty``: a review state changed since then;
     - ``next_id``: the ID of the next drawn cell, never reusing an ID of the start masks;
     - ``mode``: navigate, draw, delete or OK; ``drawing``: the outline being drawn, or None;
-    - ``read_only``: the ROI's round is closed (when opened, or since): nothing can be changed or saved;
+    - ``read_only``: the image's round is closed (when opened, or since): nothing can be changed or saved;
     - ``done``: the annotator pressed Done (every cell OK) and changed nothing since;
     - ``save_error``: why the last save failed (e.g. the network drive unreachable), or None.
 
@@ -250,7 +250,7 @@ class Annotator:
 
     def set_mode(self, mode: str) -> None:
         """``navigate`` (napari as usual), ``draw``, ``delete`` or ``toggle`` (OK); dragging pans in navigate and draw
-        (except while an outline is being drawn); in delete and OK it acts on the cells passed over. A read-only ROI
+        (except while an outline is being drawn); in delete and OK it acts on the cells passed over. A read-only image
         stays in navigate."""
         mode = NAVIGATE if self.read_only else mode
         self.cancel_outline()  # sets mouse_pan back to True: set it after
@@ -528,7 +528,7 @@ class Annotator:
 
     def save(self) -> bool:
         """Write the masks, the cell table and the review summary of the current image (``folder.save``); True if
-        written (or nothing to write: no image open, or a read-only ROI, which is never written).
+        written (or nothing to write: no image open, or a read-only image, which is never written).
 
         If the write fails (e.g. the network drive is unreachable), everything stays in memory and ``dirty``, the
         panel says so (one warning, not one per autosave), and the next autosave tries again; returns False.
@@ -681,7 +681,7 @@ class _Widget:
                 return
             counts = af.summary(annotator.cells)
             record = annotator.record
-            kind = "test region (from scratch)" if annotator.test_mode else "correction"
+            kind = "test image (from scratch)" if annotator.test_mode else "correction"
             # Whose image and which round: a mix-up of folders shows here.
             where = "test" if annotator.test_mode else f"round {record['round']}" if "round" in record else ""
             who = ", ".join(x for x in (record.get("annotator"), where) if x)
@@ -783,7 +783,7 @@ def folders_to_open(path: str | Path) -> tuple[list[Path], int]:
 
 
 def _group_to_open(folder: Path) -> Path:
-    """In an annotator's folder: the latest round with an image not closed, else the test regions, else the latest
+    """In an annotator's folder: the latest round with an image not closed, else the test images, else the latest
     round (read-only); ``folder`` itself if it holds none of them."""
     closed = {}  # round or test folder: whether each of its images is closed
     for record in folder.glob(f"*/*/{af.RECORD}"):

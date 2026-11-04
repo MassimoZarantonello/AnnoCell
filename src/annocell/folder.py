@@ -1,13 +1,13 @@
 """The round folder: everything the annotation tool reads and writes, with numpy and tifffile only.
 
-The tree: one folder per annotator, the only one they open, holding their rounds and test regions:
+The tree: one folder per annotator, the only one they open, holding their rounds and test images:
 
-- ``<root>/<annotator>/round_<NN>/<roi>/``: an ROI given to that annotator in round ``NN`` (``round_folder``);
-- ``<root>/<annotator>/test/<roi>/``: a test region, drawn from scratch (``test_regions_folder``).
+- ``<root>/<annotator>/round_<NN>/<image>/``: an image given to that annotator in round ``NN`` (``round_folder``);
+- ``<root>/<annotator>/test/<image>/``: a test image, drawn from scratch (``test_images_folder``).
 
-``rois`` lists them. Annotator names are lowercase letters, digits and ``-`` (``check_annotator``).
+``images`` lists them. Annotator names are lowercase letters, digits and ``-`` (``check_annotator``).
 
-One folder per image (an ROI), self-contained so that it can be copied to the annotator's laptop:
+One folder per image (an image), self-contained so that it can be copied to the annotator's laptop:
 
 - ``image.tif``: every channel of the crop, (channels, y, x); the names are in ``annotation.json`` (``channels``);
 - ``start_masks.tif``: the proposed masks as given to the annotator; absent in test mode (start from empty);
@@ -25,10 +25,10 @@ One writer per file, so that the pipeline and the tool can never overwrite each 
 
 ``annotation.json`` fields the tool and overviews read (all optional except ``format_version``):
 
-- written at export: ``annotator``, ``round`` (absent for a test region), ``image``, ``mode`` (``train`` /
+- written at export: ``annotator``, ``round`` (absent for a test image), ``image``, ``mode`` (``train`` /
   ``test``), ``source`` (the slide) and ``region`` (``[y0, y1, x0, x1]`` in slide pixels), ``exported_on``,
   ``channels``, ``visible_channels``, ``colours``, ``start_segmentation``, ``compare``;
-- written when the round is over: ``closed_on`` (``close``): the tool opens the ROI read-only, and stops saving if
+- written when the round is over: ``closed_on`` (``close``): the tool opens the image read-only, and stops saving if
   it had it open.
 
 ``review.json`` (``save``): the counts of ``summary`` (cells, OK, unreviewed, by origin, OK by hand / in bulk),
@@ -37,7 +37,7 @@ pressed Done with every cell OK; None before, and again after any change), ``sta
 proposal's cells, and those deleted entirely); ``is_complete`` reads it. These counts are the one definition of
 kept / edited / deleted / drawn.
 
-Next to the annotators' folders, ``<root>/scores/<model>.json``: each model's score on the test regions
+Next to the annotators' folders, ``<root>/scores/<model>.json``: each model's score on the test images
 (``write_score``, ``read_scores``), written by the pipeline.
 
 Files are written to a temporary name and renamed, so a crash during a save never leaves a broken file.
@@ -72,7 +72,7 @@ COMPARE = "compare"
 # Folder names in the tree, under an annotator's folder.
 ROUND = "round_{:02d}"
 TEST = "test"
-SCORES = "scores"  # <root>/scores/<model>.json: each model's score on the test regions (``write_score``)
+SCORES = "scores"  # <root>/scores/<model>.json: each model's score on the test images (``write_score``)
 ANNOTATOR = re.compile(r"[a-z0-9-]+")  # a folder name on Mac and Windows alike
 
 # Review state of a cell (``state``), and where its outline comes from (``origin``).
@@ -118,13 +118,13 @@ def read_review(folder: str | Path) -> dict:
 
 def is_complete(review: Mapping) -> bool:
     """Done: the annotator pressed Done with every cell OK (at least one cell, none unreviewed), and changed nothing
-    since. What training takes, and the end of a test region's drawing. ``review``: from ``read_review``."""
+    since. What training takes, and the end of a test image's drawing. ``review``: from ``read_review``."""
     return bool(review.get("completed_at")) and review.get("cells", 0) > 0 and review.get(UNREVIEWED, 1) == 0
 
 
 def close(folder: str | Path, on: date | None = None) -> None:
-    """The round of this ROI is over: ``closed_on`` (default today) in ``annotation.json``. The tool then opens the
-    ROI read-only, and one that has it open stops saving at its next save. The review and the masks stay as they
+    """The round of this image is over: ``closed_on`` (default today) in ``annotation.json``. The tool then opens the
+    image read-only, and one that has it open stops saving at its next save. The review and the masks stay as they
     are."""
     record = read_record(folder)
     record["closed_on"] = (on or date.today()).isoformat()
@@ -146,18 +146,18 @@ def check_annotator(name: str) -> str:
 
 
 def round_folder(root: str | Path, annotator: str, round_number: int) -> Path:
-    """``<root>/<annotator>/round_<NN>``: the ROIs of round ``round_number`` given to ``annotator``."""
+    """``<root>/<annotator>/round_<NN>``: the images of round ``round_number`` given to ``annotator``."""
     return Path(root) / check_annotator(annotator) / ROUND.format(round_number)
 
 
-def test_regions_folder(root: str | Path, annotator: str) -> Path:
-    """``<root>/<annotator>/test``: the test regions ``annotator`` draws from scratch."""
+def test_images_folder(root: str | Path, annotator: str) -> Path:
+    """``<root>/<annotator>/test``: the test images ``annotator`` draws from scratch."""
     return Path(root) / check_annotator(annotator) / TEST
 
 
 @dataclass(frozen=True)
-class Roi:
-    """An ROI folder of the tree; ``round`` is None for a test region."""
+class ImageFolder:
+    """An image folder of the tree; ``round`` is None for a test image."""
 
     folder: Path
     annotator: str
@@ -168,8 +168,8 @@ class Roi:
         return self.folder.name
 
 
-def rois(root: str | Path) -> list[Roi]:
-    """Every ROI folder under ``root``, by annotator, then round (test regions last), then name.
+def images(root: str | Path) -> list[ImageFolder]:
+    """Every image folder under ``root``, by annotator, then round (test images last), then name.
 
     Annotator and round are read from the folder names; other folders (not an annotator name, not ``round_<NN>`` or
     ``test``) are left out.
@@ -180,7 +180,7 @@ def rois(root: str | Path) -> list[Roi]:
         annotator, group = folder.parent.parent.name, folder.parent.name
         number = re.fullmatch(r"round_(\d+)", group)
         if ANNOTATOR.fullmatch(annotator) and (number or group == TEST):
-            found.append(Roi(folder, annotator, int(number[1]) if number else None))
+            found.append(ImageFolder(folder, annotator, int(number[1]) if number else None))
     return sorted(found, key=lambda r: (r.annotator, r.round is None, r.round or 0, r.name))
 
 
@@ -315,10 +315,10 @@ def save(
 
 
 def write_score(root: str | Path, score: Mapping) -> Path:
-    """Write the score of one model on the test regions to ``<root>/scores/<model>.json`` and return the file.
+    """Write the score of one model on the test images to ``<root>/scores/<model>.json`` and return the file.
 
     ``score``: ``model`` (its name), ``round`` (the round whose corrections it was trained on; 0 for the starting
-    model), ``scored_on`` and ``regions``: one entry per test region with ``region``, ``annotator`` and the scores
+    model), ``scored_on`` and ``images``: one entry per test image with ``image``, ``annotator`` and the scores
     (``AP@0.5``, ``AP@0.75``, ...). Written by the pipeline (AnnoLoop), read by overviews (AnnOverview).
     """
     path = Path(root) / SCORES / f"{score['model']}.json"
@@ -327,7 +327,7 @@ def write_score(root: str | Path, score: Mapping) -> Path:
 
 
 def read_scores(root: str | Path) -> list[dict]:
-    """Every model's score on the test regions under ``root``, by round then model name."""
+    """Every model's score on the test images under ``root``, by round then model name."""
     scores = [json.loads(p.read_text()) for p in (Path(root) / SCORES).glob("*.json")]
     return sorted(scores, key=lambda s: (s.get("round", 0), s.get("model", "")))
 

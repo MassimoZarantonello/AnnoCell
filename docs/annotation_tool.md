@@ -12,12 +12,12 @@ Massimo exports, in Python, from AnnoLoop (`macroseg.annotation`):
 
 ```python
 export_round(sdata, cfg, "membrane_dapi", root, 2, "alice", compare=["exp201_test_crop_r01"], models_root=models)
-export_test(sdata, cfg, [y0, y1, x0, x1], root, "carla")  # a test region, drawn from scratch
-close_round(root, 2)  # the round is over: its ROIs become read-only
+export_test(sdata, cfg, [y0, y1, x0, x1], root, "carla")  # a test image, drawn from scratch
+close_round(root, 2)  # the round is over: its images become read-only
 ```
 
 The annotator opens their own folder; the tool opens their latest round that is not closed (else their test
-regions, else their latest round, read-only):
+images, else their latest round, read-only):
 
 ```bash
 annocell <root>/alice
@@ -29,13 +29,13 @@ outside the tool.
 
 Three verbs, three owners:
 
-- **closing** a round (`close_round(root, n)` in AnnoLoop, which calls `annocell.folder.close` on each ROI) writes
-  `closed_on` in `annotation.json`: the round is over, its ROIs open read-only from then on, and AnnoLoop refuses to
+- **closing** a round (`close_round(root, n)` in AnnoLoop, which calls `annocell.folder.close` on each image) writes
+  `closed_on` in `annotation.json`: the round is over, its images open read-only from then on, and AnnoLoop refuses to
   export into it. Nothing else changes: the masks and the review stay as the annotator left them;
 - **done** (complete, `annocell.folder.is_complete`) is the annotator's: they press **Done** when every cell is OK
   (at least one cell, none unreviewed), and the review records it (`completed_at`). Any change afterwards takes it
-  back. Training takes the done ROIs, closed or not; for a test region it is the end of the drawing;
-- **finishing** an ROI (`finish(folder)` in AnnoLoop, optional) writes in `annotation.json` its `status`
+  back. Training takes the done images, closed or not; for a test image it is the end of the drawing;
+- **finishing** an image (`finish(folder)` in AnnoLoop, optional) writes in `annotation.json` its `status`
   (`complete` / `partial`) and `start_score`, the score of the proposal against the corrections. It does not count
   the corrections: those are AnnoCell's review.
 
@@ -51,7 +51,7 @@ and eraser are there too, without their keys.)
 
 ## Users and setting
 
-- Biologists (not programmers), several, each with their own ROIs in their own folder: one annotator per ROI.
+- Biologists (not programmers), several, each with their own images in their own folder: one annotator per image.
 - Runs **locally** on the annotator's computer, **Mac or Windows** (unknown in advance): nothing OS-specific,
   shortcuts documented as Ctrl / Cmd.
 - No training, no GPU needed in the tool.
@@ -122,21 +122,21 @@ and the tool does not change image until it has saved. If it still cannot save w
 to `AnnoCell unsaved` in the home folder and says so. Saves write a temporary file and rename it, so a dropped
 connection never leaves half a file.
 
-**Closed rounds.** An ROI whose round is over (`closed_on`, written by the pipeline) opens **read-only**: no editing
+**Closed rounds.** An image whose round is over (`closed_on`, written by the pipeline) opens **read-only**: no editing
 mode, no drawing, no marking, never saved; the panel says "Round N closed: read-only". Its masks were already used
 for training: changing them afterwards would make that training impossible to reproduce. A round closed while an
-ROI of it is open: the tool reads `closed_on` before every save, and the next save (within 3 seconds) turns the ROI
+image of it is open: the tool reads `closed_on` before every save, and the next save (within 3 seconds) turns the image
 read-only and writes nothing; the changes since the last save are dropped, with a warning.
 
 ## Data
 
-One folder per annotator, the only one they open, with their rounds and test regions inside:
-`<root>/<annotator>/round_<NN>/<roi>/` and `<root>/<annotator>/test/<roi>/` (`annocell.folder.rois` lists them;
+One folder per annotator, the only one they open, with their rounds and test images inside:
+`<root>/<annotator>/round_<NN>/<image>/` and `<root>/<annotator>/test/<image>/` (`annocell.folder.images` lists them;
 annotator names are lowercase letters, digits and `-`). Annotator first, so that nobody has to pick their round
-among everyone's. When a round is over, the pipeline closes its ROIs (`closed_on`, `annocell.folder.close`).
+among everyone's. When a round is over, the pipeline closes its images (`closed_on`, `annocell.folder.close`).
 Overviews (AnnOverview) read the tree and never write to it.
 
-One folder per ROI, **self-contained**: the annotator's laptop has no stores, so the export copies everything the
+One folder per image, **self-contained**: the annotator's laptop has no stores, so the export copies everything the
 tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, Harpy or Cellpose). A 1024 x 1024,
 6-channel uint16 crop is 12 MB; a mask is 4 MB.
 
@@ -178,7 +178,7 @@ groups on corrected cells, and how much of it is autofluorescence (`autofluo_APC
 Not in the tool. Fine-tuning runs in AnnoLoop (`macroseg.train`, notebook 04 for now, a cluster script later). The
 tool only picks up a new model's segmentation of the next image as its proposal, when it exists.
 
-## Test ROI
+## Test image
 
 A test set annotated **from scratch**, never used for training, to score every model every round (AP on all
 cells and on macrophages, one curve over rounds); correction effort per round is the supporting evidence.
@@ -197,9 +197,9 @@ Drawn once and then fixed.
   within one cell diameter (60 px) of a patch are rejected. Patches lie outside every crop already annotated
   (Exp201: outside `[2000:4048, 2000:4048]`).
 - **Fully excluded from training**: test patches never enter `training_set`, not even as Cellpose's test loss:
-  AnnoLoop's `training_set` reads only the complete ROIs of the rounds, never `<annotator>/test/`.
+  AnnoLoop's `training_set` reads only the complete images of the rounds, never `<annotator>/test/`.
 - **Macrophages are not marked by hand**, not even here: a macrophage flag in test mode was built and removed
-  (2026-11-03). On test regions too, macrophages come from the F4/80 rule on the drawn masks (see Macrophages), so
+  (2026-11-03). On test images too, macrophages come from the F4/80 rule on the drawn masks (see Macrophages), so
   the AP on macrophages measures outlines, not the annotator's judgement of what a macrophage is.
 - **Drawn by the biologist**, the same person who corrects the training images (otherwise part of every score is
   the difference between two annotators' styles), and the same person for every test set.
@@ -210,8 +210,8 @@ Drawn once and then fixed.
 
 - Training or segmenting from the GUI.
 - Per-cell confidence (needs the segmentation step to save Cellpose's probability map).
-- Several annotators on the same ROI (blending them is the pipeline's: macroseg `docs/concurrent_annotations.md`),
-  locking, time per image (decided: not measured; the review records only when an ROI was started and finished,
+- Several annotators on the same image (blending them is the pipeline's: macroseg `docs/concurrent_annotations.md`),
+  locking, time per image (decided: not measured; the review records only when an image was started and finished,
   `started_at` / `completed_at`).
 - Classification of cells (macrophage / other): a later phase. No per-cell macrophage mark anywhere.
 

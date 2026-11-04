@@ -27,7 +27,7 @@ def start_masks() -> np.ndarray:
 
 def write_folder(folder: Path, test: bool = False, colours: dict | None = None) -> Path:
     """A training image (proposal + one comparison layer), or a test image drawn from scratch (``test``), in
-    ``<root>/<annotator>/<round_NN or test>/<roi>/``."""
+    ``<root>/<annotator>/<round_NN or test>/<image>/``."""
     af.write_image(folder, image())
     record = {
         "annotator": folder.parent.parent.name,
@@ -58,5 +58,5 @@ def train_folder(tmp_path) -> Path:
 @pytest.fixture
 def test_folder(tmp_path) -> Path:
     return write_folder(
-        af.test_regions_folder(tmp_path, "carla") / "patch_y500_x500", test=True, colours={"DAPI": "blue"}
+        af.test_images_folder(tmp_path, "carla") / "patch_y500_x500", test=True, colours={"DAPI": "blue"}
     )

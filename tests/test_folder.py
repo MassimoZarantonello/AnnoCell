@@ -68,16 +68,16 @@ def test_image_folders_lists_folders_with_a_record(train_folder):
 
 def test_rois_walks_the_tree(train_folder, test_folder, tmp_path):
     (tmp_path / "alice" / "notes").mkdir()  # not a round: left out
-    write_folder(af.round_folder(tmp_path, "alice", 10) / "roi_b")
-    write_folder(af.round_folder(tmp_path, "bob", 2) / "roi_a")
-    found = [(r.annotator, r.round, r.name) for r in af.rois(tmp_path)]
+    write_folder(af.round_folder(tmp_path, "alice", 10) / "image_b")
+    write_folder(af.round_folder(tmp_path, "bob", 2) / "image_a")
+    found = [(r.annotator, r.round, r.name) for r in af.images(tmp_path)]
     assert found == [
         ("alice", 2, "test_image"),
-        ("alice", 10, "roi_b"),  # by round number, not by name
-        ("bob", 2, "roi_a"),
+        ("alice", 10, "image_b"),  # by round number, not by name
+        ("bob", 2, "image_a"),
         ("carla", None, "patch_y500_x500"),
     ]
-    assert af.rois(tmp_path)[0].folder == train_folder
+    assert af.images(tmp_path)[0].folder == train_folder
     assert af.read_record(train_folder)["annotator"] == "alice"
 
 
@@ -127,12 +127,12 @@ def test_review_counts_deleted_cells_and_scores_are_stored(train_folder, tmp_pat
     af.save(train_folder, masks, af.sync_cells({}, masks, start), start)
     review = af.read_review(train_folder)
     assert (review["start_cells"], review["deleted"], review[af.EDITED], review[af.PROPOSED]) == (3, 1, 1, 1)
-    first = {"model": "m2", "round": 2, "regions": [{"region": "p", "AP@0.5": 0.8}]}
+    first = {"model": "m2", "round": 2, "images": [{"image": "p", "AP@0.5": 0.8}]}
     af.write_score(tmp_path, first)
-    af.write_score(tmp_path, {"model": "m1", "round": 1, "regions": []})
+    af.write_score(tmp_path, {"model": "m1", "round": 1, "images": []})
     assert [s["model"] for s in af.read_scores(tmp_path)] == ["m1", "m2"]
     assert af.read_scores(tmp_path / "nothing") == []
-    assert {r.annotator for r in af.rois(tmp_path)} == {"alice"}  # the scores folder is not an annotator
+    assert {r.annotator for r in af.images(tmp_path)} == {"alice"}  # the scores folder is not an annotator
 
 
 def test_how_cells_became_ok(train_folder):

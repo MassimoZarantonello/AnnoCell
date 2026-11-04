@@ -249,8 +249,8 @@ def test_annotator_folder_opens_the_latest_open_round(tmp_path):
     af.close(alice / "round_02" / "b")
     af.close(alice / "round_02" / "c")
     assert folders_to_open(alice)[0] == [alice / "round_10" / "d"]  # all closed: the latest round, read-only
-    carla = write_folder(af.test_regions_folder(tmp_path, "carla") / "patch", test=True)
-    assert folders_to_open(tmp_path / "carla")[0] == [carla]  # only test regions
+    carla = write_folder(af.test_images_folder(tmp_path, "carla") / "patch", test=True)
+    assert folders_to_open(tmp_path / "carla")[0] == [carla]  # only test images
     with pytest.raises(FileNotFoundError, match="your own folder"):
         folders_to_open(tmp_path)  # the shared root: several annotators, nothing to pick
 
