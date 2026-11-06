@@ -17,13 +17,13 @@ napari = pytest.importorskip("napari")
 def no_message_boxes(monkeypatch):
     """A Qt message box would wait for a click forever: a message no test expects fails it instead, and a question
     (leave an image not done?) is answered yes, so that closing the viewer at the end of a test goes through."""
-    from annocell import app
+    from annocell import dialogs
 
     def unexpected(text, parent=None):
         raise AssertionError(f"unexpected message: {text}")
 
-    monkeypatch.setattr(app, "_message", unexpected)
-    monkeypatch.setattr(app, "_ask", lambda text, parent=None: True)
+    monkeypatch.setattr(dialogs, "message", unexpected)
+    monkeypatch.setattr(dialogs, "ask", lambda text, parent=None: True)
 
 
 def test_tool_corrects_marks_and_saves(train_folder, test_folder):
@@ -277,11 +277,11 @@ def test_closed_roi_is_read_only(train_folder):
 
 
 def test_done_needs_every_cell_ok(train_folder, monkeypatch):
-    from annocell import app
+    from annocell import dialogs
     from annocell.app import Annotator
 
     messages = []
-    monkeypatch.setattr(app, "_message", lambda text, parent=None: messages.append(text))
+    monkeypatch.setattr(dialogs, "message", lambda text, parent=None: messages.append(text))
     viewer = napari.Viewer(show=False)
     try:
         tool = Annotator(viewer, [train_folder], 0)
@@ -308,11 +308,11 @@ def test_done_needs_every_cell_ok(train_folder, monkeypatch):
 
 
 def test_next_image_needs_every_cell_ok(train_folder, test_folder, monkeypatch):
-    from annocell import app
+    from annocell import dialogs
     from annocell.app import Annotator
 
     messages = []
-    monkeypatch.setattr(app, "_message", lambda text, parent=None: messages.append(text))
+    monkeypatch.setattr(dialogs, "message", lambda text, parent=None: messages.append(text))
     viewer = napari.Viewer(show=False)
     try:
         tool = Annotator(viewer, [train_folder, test_folder], 0)
@@ -337,7 +337,7 @@ def test_leaving_an_image_not_done_asks_first(train_folder, test_folder, monkeyp
     from qtpy.QtGui import QCloseEvent
     from qtpy.QtWidgets import QApplication
 
-    from annocell import app
+    from annocell import dialogs
     from annocell.app import Annotator
 
     questions, answer = [], [False]
@@ -346,7 +346,7 @@ def test_leaving_an_image_not_done_asks_first(train_folder, test_folder, monkeyp
         questions.append((text, parent))
         return answer[0]
 
-    monkeypatch.setattr(app, "_ask", ask)
+    monkeypatch.setattr(dialogs, "ask", ask)
     viewer = napari.Viewer(show=False)
     try:
         tool = Annotator(viewer, [train_folder], 0)
