@@ -34,9 +34,9 @@ def test_origins_and_sync():
     masks[0:2, 10:20] = 0  # cell 2 trimmed
     masks[:, 20:30] = 5  # cell 5 drawn
     assert af.origins(masks, start) == {1: af.PROPOSED, 2: af.EDITED, 5: af.DRAWN}
-    cells = af.sync_cells({1: af.Cell(af.OK), 9: af.Cell()}, masks, start)
-    assert cells[1].state == af.OK and 9 not in cells  # deleted cells are dropped
-    assert cells[2].state == cells[5].state == af.OK  # cells new to the table: OK unless proposed
+    cells = af.sync_cells({1: af.Cell(True), 9: af.Cell()}, masks, start)
+    assert cells[1].ok and 9 not in cells  # deleted cells are dropped
+    assert cells[2].ok and cells[5].ok  # cells new to the table: OK unless proposed
 
 
 def test_ids_inside_leaves_out_cells_cut_by_the_view():
@@ -96,7 +96,7 @@ def test_complete_and_closed(train_folder):
     af.save(train_folder, masks, cells)
     assert not af.is_complete(af.read_review(train_folder))  # every cell still unreviewed
     for cell in cells.values():
-        cell.state = af.OK
+        cell.ok = True
     af.save(train_folder, masks, cells)
     assert not af.is_complete(af.read_review(train_folder))  # every cell OK, but Done not pressed
     af.save(train_folder, masks, cells, done=True)
@@ -108,10 +108,10 @@ def test_complete_and_closed(train_folder):
     af.save(train_folder, masks, cells)  # a change after Done: no longer finished, still started
     review = af.read_review(train_folder)
     assert review["completed_at"] is None and review["started_at"] == started
-    cells[1].state = af.UNREVIEWED
+    cells[1].ok = False
     af.save(train_folder, masks, cells, done=True)  # Done with a cell not checked: not finished
     assert not af.is_complete(af.read_review(train_folder))
-    cells[1].state = af.OK
+    cells[1].ok = True
     af.save(train_folder, masks, cells, done=True)
     af.close(train_folder, date(2026, 11, 2))
     record = af.read_record(train_folder)
@@ -140,12 +140,12 @@ def test_how_cells_became_ok(train_folder):
     masks = start.copy()
     masks[12:20, 20:30] = 4  # drawn: OK by hand
     cells = af.sync_cells({}, masks, start)
-    assert cells[4] == af.Cell(af.OK, af.DRAWN, af.HAND) and cells[1].ok_by == ""
-    cells[1].mark(af.OK, af.BULK)
-    cells[2].mark(af.OK)  # by hand
+    assert cells[4] == af.Cell(True, af.DRAWN, af.HAND) and cells[1].ok_by == ""
+    cells[1].mark(True, af.BULK)
+    cells[2].mark(True)  # by hand
     af.save(train_folder, masks, cells)
     assert af.read_cells(train_folder) == cells
     review = af.read_review(train_folder)
     assert (review["ok_hand"], review["ok_bulk"], review[af.UNREVIEWED]) == (2, 1, 1)
-    cells[1].mark(af.UNREVIEWED)  # unchecked again: forgets how
+    cells[1].mark(False)  # unchecked again: forgets how
     assert cells[1].ok_by == ""

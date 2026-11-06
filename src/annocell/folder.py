@@ -14,9 +14,10 @@ One folder per image (an image), self-contained so that it can be copied to the 
 - ``compare/<segmentation>.tif``: read-only comparison masks; ``annotation.json`` (``compare``) says whether each
   model was trained on this image;
 - ``masks.tif``: the current masks (uint32 labels), written by the tool;
-- ``cells.csv``: one row per cell of ``masks.tif``: ``cell_ID``, ``state`` (``unreviewed`` / ``ok``),
-  ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks) and ``ok_by`` (how an
-  OK cell became OK: ``hand`` or ``bulk``, empty while unreviewed);
+- ``cells.csv``: one row per cell of ``masks.tif``: ``cell_ID``, ``ok`` (``True`` / ``False``: checked by the
+  annotator, or not yet), ``origin`` (``proposed`` / ``edited`` / ``drawn``, computed against the start masks),
+  ``ok_by`` (how an OK cell became OK: ``hand`` or ``bulk``, empty while not checked) and ``is_macrophage``
+  (``True`` / ``False``; marked on test images only, to score the models on macrophages);
 - ``annotation.json``: where it all comes from, written by the pipeline (AnnoLoop) only, never by the tool;
   ``format_version`` is the version of this layout (``FORMAT_VERSION``);
 - ``review.json``: the review summary, written by the tool only, at every save (``read_review``).
@@ -58,8 +59,9 @@ import numpy as np
 import tifffile
 
 # Of the folder layout; bump on any change an older reader would misread. 2: the review in review.json, ``ok_by`` in
-# cells.csv. Older folders are not read: export them again.
-FORMAT_VERSION = 2
+# cells.csv. 3: ``ok`` (True / False) in cells.csv instead of ``state``, and ``is_macrophage``. Older folders are not
+# read: export them again.
+FORMAT_VERSION = 3
 
 # File names inside an image folder.
 IMAGE = "image.tif"
@@ -75,8 +77,10 @@ TEST = "test"
 SCORES = "scores"  # <root>/scores/<model>.json: each model's score on the test images (``write_score``)
 ANNOTATOR = re.compile(r"[a-z0-9-]+")  # a folder name on Mac and Windows alike
 
-# Review state of a cell (``state``), and where its outline comes from (``origin``).
+# The review counts of ``summary`` and ``review.json``: cells OK, and cells not checked yet. A cell's own state is
+# a bool, ``Cell.ok``.
 UNREVIEWED, OK = "unreviewed", "ok"
+# Where a cell's outline comes from (``origin``).
 PROPOSED, EDITED, DRAWN = "proposed", "edited", "drawn"
 # How an OK cell became OK (``ok_by``): ``hand``, one at a time (marked, edited or drawn), or ``bulk``, with "all in
 # view OK". The last action wins.
@@ -85,16 +89,17 @@ HAND, BULK = "hand", "bulk"
 
 @dataclass
 class Cell:
-    """One row of ``cells.csv``: review state, origin, and how it became OK."""
+    """One row of ``cells.csv``: checked or not, origin, how it became OK, and whether it is a macrophage."""
 
-    state: str = UNREVIEWED
+    ok: bool = False  # checked by the annotator; False: not checked yet
     origin: str = PROPOSED
-    ok_by: str = ""  # HAND or BULK when OK; empty while unreviewed
+    ok_by: str = ""  # HAND or BULK when OK; empty while not checked
+    is_macrophage: bool = False
 
-    def mark(self, state: str, by: str = HAND) -> None:
-        """Set the review state; an OK cell records ``by`` (how), an unreviewed one forgets it."""
-        self.state = state
-        self.ok_by = by if state == OK else ""
+    def mark(self, ok: bool, by: str = HAND) -> None:
+        """OK (``True``) or back to not checked (``False``); an OK cell records ``by`` (how), the other forgets it."""
+        self.ok = ok
+        self.ok_by = by if ok else ""
 
 
 def read_record(folder: str | Path) -> dict:
@@ -222,15 +227,19 @@ def read_cells(folder: str | Path) -> dict[int, Cell]:
     if not path.exists():
         return {}
     with path.open(newline="") as f:
-        return {int(row["cell_ID"]): Cell(row["state"], row["origin"], row["ok_by"]) for row in csv.DictReader(f)}
+        # csv gives strings: "True" / "False", as ``write_cells`` writes them (``bool("False")`` would be True).
+        return {
+            int(row["cell_ID"]): Cell(row["ok"] == "True", row["origin"], row["ok_by"], row["is_macrophage"] == "True")
+            for row in csv.DictReader(f)
+        }
 
 
 def write_cells(folder: str | Path, cells: Mapping[int, Cell]) -> None:
     """Write the review table, one row per cell sorted by ID."""
 
     def write(f):
-        lines = ["cell_ID,state,origin,ok_by"]
-        lines += [f"{i},{c.state},{c.origin},{c.ok_by}" for i, c in sorted(cells.items())]
+        lines = ["cell_ID,ok,origin,ok_by,is_macrophage"]
+        lines += [f"{i},{c.ok},{c.origin},{c.ok_by},{c.is_macrophage}" for i, c in sorted(cells.items())]
         f.write(("\n".join(lines) + "\n").encode())
 
     _write_atomic(Path(folder) / CELLS, write)
@@ -262,13 +271,13 @@ def origins(masks: np.ndarray, start: np.ndarray) -> dict[int, str]:
 def sync_cells(cells: Mapping[int, Cell], masks: np.ndarray, start: np.ndarray) -> dict[int, Cell]:
     """``cells`` matched to ``masks``: deleted cells dropped, new cells added, origins recomputed.
 
-    A new cell (absent from ``cells``) is OK (by hand) when drawn or edited, unreviewed when proposed.
+    A new cell (absent from ``cells``) is OK (by hand) when drawn or edited, not checked when proposed.
     """
     synced = {}
     for i, origin in origins(masks, start).items():
-        # A known cell keeps its state and ok_by; only its origin is updated.
-        cell = cells.get(i) or (Cell(UNREVIEWED) if origin == PROPOSED else Cell(OK, ok_by=HAND))
-        synced[i] = Cell(cell.state, origin, cell.ok_by)
+        # A known cell keeps ok, ok_by and is_macrophage; only its origin is updated.
+        cell = cells.get(i) or (Cell(False) if origin == PROPOSED else Cell(True, ok_by=HAND))
+        synced[i] = Cell(cell.ok, origin, cell.ok_by, cell.is_macrophage)
     return synced
 
 
@@ -277,9 +286,9 @@ def summary(cells: Mapping[int, Cell]) -> dict:
     values = list(cells.values())
     return {
         "cells": len(values),
-        OK: sum(c.state == OK for c in values),
-        UNREVIEWED: sum(c.state == UNREVIEWED for c in values),
-        **{f"ok_{by}": sum(c.state == OK and c.ok_by == by for c in values) for by in (HAND, BULK)},
+        OK: sum(c.ok for c in values),
+        UNREVIEWED: sum(not c.ok for c in values),
+        **{f"ok_{by}": sum(c.ok and c.ok_by == by for c in values) for by in (HAND, BULK)},
         **{origin: sum(c.origin == origin for c in values) for origin in (PROPOSED, EDITED, DRAWN)},
     }
 

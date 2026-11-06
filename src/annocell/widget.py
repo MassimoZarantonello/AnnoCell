@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from annocell import folder as af
-from annocell.constants import COLOURS, DELETE, DRAW, NAVIGATE, TOGGLE, WARNING
+from annocell.constants import COLOURS, DELETE, DRAW, MACROPHAGE, MACROPHAGE_COLOUR, NAVIGATE, TOGGLE, WARNING
 
 
 class Widget:
@@ -39,8 +39,9 @@ class Widget:
         legend = QLabel(
             "<br>".join(
                 [
-                    swatch(af.UNREVIEWED, "not checked"),
-                    swatch(af.OK, "OK"),
+                    swatch(False, "not checked"),
+                    swatch(True, "OK"),
+                    f"<span style='color:{hex_colour(MACROPHAGE_COLOUR)}'>&#9633;</span> macrophage (test images)",
                 ]
             )
         )
@@ -71,11 +72,12 @@ class Widget:
             "<tr><td>Scroll</td><td>zoom</td></tr>"
             "</table><b>Keys</b> (on the cell under the mouse)<table>"
             "<tr><td>N</td><td>draw mode: left click draws</td></tr>"
-            "<tr><td>D</td><td>delete mode: click or drag to delete</td></tr>"
+            "<tr><td>D</td><td>delete mode: click or drag to delete (not OK cells: O first)</td></tr>"
             "<tr><td>Esc</td><td>drop outline / leave mode</td></tr>"
             "<tr><td>O</td><td>OK mode: click or drag to mark OK / not checked</td></tr>"
+            "<tr><td>M</td><td>Macrophage mode: click to mark/unmark a cell as a macrophage</td></tr>"
             "<tr><td>Shift+O&nbsp;</td><td>all in view OK</td></tr>"
-            "<tr><td>Cmd+Z&nbsp;</td><td>undo (Ctrl+Z on Windows)</td></tr>"
+            "<tr><td>Cmd+Z&nbsp;</td><td>undo, OK marks too (Ctrl+Z on Windows; Shift: redo)</td></tr>"
             "</table>napari's brush, eraser and fill: their buttons, no keys. Saved automatically."
         )
         keys.setWordWrap(True)
@@ -115,6 +117,7 @@ class Widget:
                 DRAW: "draw (N)",
                 DELETE: "delete (D): click or drag over the cells to delete",
                 TOGGLE: "OK (O): click or drag over the cells to mark",
+                MACROPHAGE: "macrophage (M): click a cell to mark / unmark"
             }
             mode.setText(f"Mode: <b>{'read-only' if annotator.read_only else names[annotator.mode]}</b>")
             compare.setEnabled(not annotator.test_mode)

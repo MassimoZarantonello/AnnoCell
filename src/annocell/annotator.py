@@ -16,13 +16,26 @@ a copy goes to ``AnnoCell unsaved`` in the home folder.
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 
 from annocell import dialogs
 from annocell import folder as af
-from annocell.constants import CHANNEL_COLORMAPS, COLOURS, DELETE, DRAW, NAPARI_KEYS, NAVIGATE, SAVE_EVERY_MS, TOGGLE
+from annocell.constants import (
+    CHANNEL_COLORMAPS,
+    COLOURS,
+    DELETE,
+    DRAW,
+    MACROPHAGE,
+    MACROPHAGE_COLOUR,
+    NAPARI_KEYS,
+    NAVIGATE,
+    SAVE_EVERY_MS,
+    TOGGLE,
+    UNDO_STEPS,
+)
 from annocell.opening import folders_to_open
 from annocell.tools import Tools
 from annocell.widget import Widget
@@ -35,7 +48,8 @@ class Annotator(Tools):
 
     - ``masks``: the editable labels layer; its ``data`` is the current masks;
     - ``start``: the proposed masks (all background in test mode), to tell proposed, edited and drawn cells apart;
-    - ``cells``: ``{cell_ID: Cell}``, the review state of every cell in ``masks``;
+    - ``cells``: ``{cell_ID: Cell}``, the review state of every cell in ``masks``; ``removed``: the rows of the
+      cells deleted since the image was opened, given back if a cell comes back (undo);
     - ``snapshot``: the masks after the last handled edit, to find what the next edit changed;
     - ``saved``: the masks as last written to disk, and ``dirty``: a review state changed since then;
     - ``next_id``: the ID of the next drawn cell, never reusing an ID of the start masks;
@@ -107,6 +121,7 @@ class Annotator(Tools):
 
     def load(self, index: int) -> None:
         """Show image ``index`` of the round: its channels and masks, with the review saved so far."""
+        from app_model.types import KeyCode, KeyMod
         from qtpy.QtCore import QTimer
 
         self.index = index
@@ -119,6 +134,8 @@ class Annotator(Tools):
         self.start = af.read_start(self.folder, shape)
         masks = af.read_masks(self.folder, shape)  # the saved corrections, else the proposal
         self.cells = af.sync_cells(af.read_cells(self.folder), masks, self.start)
+        self.removed = {}
+        self.history, self.future = deque(maxlen=UNDO_STEPS), []  # the tool's undo (``Tools.undo``)
         self.done = af.is_complete(af.read_review(self.folder))
         self.next_id = int(max(masks.max(), self.start.max())) + 1
 
@@ -154,6 +171,10 @@ class Annotator(Tools):
         for key in NAPARI_KEYS:
             self.masks.bind_key(key, lambda layer: None, overwrite=True)
         self.masks.bind_key("Escape", lambda layer: self.escape(), overwrite=True)
+        # Undo and redo: ours, which also take back the OK marks (napari's undo only knows pixels).
+        self.masks.bind_key(KeyMod.CtrlCmd | KeyCode.KeyZ, lambda layer: self.undo(), overwrite=True)
+        self.masks.bind_key(KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ, lambda layer: self.redo(), overwrite=True)
+        self.masks.bind_key("m", lambda layer: self.toggle_mode(MACROPHAGE), overwrite=True)
         self.set_compare(self.show_compare)
         self.set_mode(self.mode)
         self.viewer.title = f"AnnoCell: {self.folder.name}"
@@ -250,7 +271,7 @@ class Annotator(Tools):
         """Centre the view on the unreviewed cell closest to the current centre."""
         from scipy import ndimage
 
-        ids = [i for i, c in self.cells.items() if c.state == af.UNREVIEWED]
+        ids = [i for i, c in self.cells.items() if not c.ok]
         if not ids:
             return
         centres = np.asarray(ndimage.center_of_mass(np.ones_like(self.masks.data), self.masks.data, ids))
@@ -273,9 +294,10 @@ class Annotator(Tools):
         from napari.utils.colormaps import DirectLabelColormap
 
         # One colour per cell ID; ``None`` is the colour of IDs not in the table (none, normally), 0 the background.
-        colours = {None: COLOURS[af.UNREVIEWED], 0: (0, 0, 0, 0)}
+        colours = {None: COLOURS[False], 0: (0, 0, 0, 0)}
         for i, cell in self.cells.items():
-            colours[i] = COLOURS[cell.state]
+            # A macrophage (test images) shows as such, OK or not: every cell ends OK there anyway.
+            colours[i] = MACROPHAGE_COLOUR if cell.is_macrophage else COLOURS[cell.ok]
         self.masks.colormap = DirectLabelColormap(color_dict=colours)
         self.widget.update_status()
 
@@ -284,8 +306,8 @@ class Annotator(Tools):
         if not self.is_open:
             return
         data = self.masks.data
-        if not np.array_equal(data, self.snapshot):  # undo / redo leave no paint event
-            self.cells = af.sync_cells(self.cells, data, self.start)
+        if not np.array_equal(data, self.snapshot):  # an undo not by our keys: no paint event
+            self._sync_cells()
             self.snapshot = data.copy()
             self.changed()
         if self.dirty or not np.array_equal(data, self.saved):
@@ -307,7 +329,7 @@ class Annotator(Tools):
         if not self.is_open or self.read_only:
             return True
         data = self.masks.data
-        self.cells = af.sync_cells(self.cells, data, self.start)
+        self._sync_cells()
         try:
             record = af.read_record(self.folder)  # one small file, every few seconds: cheap
             if af.is_closed(record):
@@ -355,6 +377,7 @@ class Annotator(Tools):
             "d": lambda: self.toggle_mode(DELETE),
             "Escape": self.escape,
             "o": lambda: self.toggle_mode(TOGGLE),
+            "m": lambda: self.toggle_mode(MACROPHAGE),
             "Shift-O": self.all_in_view_ok,
         }
         for key, action in actions.items():

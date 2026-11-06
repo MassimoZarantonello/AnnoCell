@@ -11,7 +11,7 @@ outlined in yellow (unreviewed) or green (OK). Read-only comparison masks of oth
 layer list only on request (a checkbox), hidden.
 
 napari's own editing tools (brush, eraser, fill, polygon, picker) are there, as buttons only: their keys (P, E, F,
-L, 1 to 7, M, ...) do nothing (``NAPARI_KEYS``), so a key pressed by mistake never changes the masks. Picking one of
+L, 1 to 7, ...) do nothing (``NAPARI_KEYS``), so a key pressed by mistake never changes the masks. Picking one of
 them leaves the tool's mode.
 
 How it fits together:

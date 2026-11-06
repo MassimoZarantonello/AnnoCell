@@ -40,7 +40,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         assert [layer.name for layer in viewer.layers] == names
         assert [layer.visible for layer in viewer.layers][:4] == [True, True, False, False]
         assert [layer.colormap.name for layer in viewer.layers][:4] == ["red", "green", "blue", "red"]  # in turn
-        assert len(tool.cells) == 3 and all(c.state == af.UNREVIEWED for c in tool.cells.values())
+        assert len(tool.cells) == 3 and all(not c.ok for c in tool.cells.values())
         tool.set_compare(True)  # comparison masks only on request, below the masks
         assert [layer.name for layer in viewer.layers][-2:] == ["model_a (trained on this image)", "masks (from cells)"]
         tool.set_compare(False)
@@ -49,7 +49,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         tool.toggle_mode(TOGGLE)  # O: OK mode
         assert tool.mode == TOGGLE and not tool.masks.mouse_pan and tool.masks.cursor == "pointing"
         _click(tool, viewer, 1, (5, 5))  # cell 1
-        assert tool.cells[1].state == af.OK and tool.cells[1].ok_by == af.HAND
+        assert tool.cells[1].ok and tool.cells[1].ok_by == af.HAND
         tool.toggle_mode(TOGGLE)  # O again: back to navigating
         assert tool.mode == NAVIGATE and tool.masks.mouse_pan
 
@@ -59,7 +59,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         QApplication.processEvents()  # the tool reads the new pixels after the paint event
         assert 3 not in tool.cells and not (tool.masks.data == 3).any()
         keys = viewer.window._qt_viewer._key_map_handler
-        for key in ("P", "E", "F", "2", "M"):  # napari's keys for its tools and labels do nothing
+        for key in ("P", "E", "F", "2"):  # napari's keys for its tools and labels do nothing (M is the tool's own)
             keys.press_key(key)
             keys.release_key(key)
         assert tool.masks.mode == "pan_zoom" and tool.mode == DELETE and tool.masks.selected_label == 4
@@ -70,14 +70,14 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
 
         tool.masks.data_setitem((np.array([0, 1]), np.array([12, 12])), 0)  # two pixels of cell 2 to background
         QApplication.processEvents()
-        assert tool.cells[2].state == af.OK and tool.cells[2].origin == af.EDITED
+        assert tool.cells[2].ok and tool.cells[2].origin == af.EDITED
 
         tool.toggle_mode(DRAW)
         assert tool.mode == DRAW and tool.masks.mode == "pan_zoom"
         assert tool.draw_cell(np.array([[12.0, 20], [12, 21], [13, 21]])) == 0  # too small: a slip
         cell = tool.draw_cell(np.array([[12.0, 20], [12, 29], [19, 29], [19, 20]]))
         QApplication.processEvents()
-        assert cell == 4 and tool.cells[4] == af.Cell(af.OK, af.DRAWN, af.HAND)
+        assert cell == 4 and tool.cells[4] == af.Cell(True, af.DRAWN, af.HAND)
         assert tool.masks.selected_label == 5  # napari's brush now starts a new cell, not cell 4
         assert tool.draw_cell(np.array([[12.0, 0], [12, 9], [19, 9], [19, 0]])) == 5  # each outline a new cell
         QApplication.processEvents()
@@ -107,10 +107,10 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
             review[af.DRAWN] == 4 and review[af.EDITED] == 1 and set(af.read_cells(train_folder)) == {1, 2, 4, 5, 6, 7}
         )
 
-        tool.cells[1].mark(af.UNREVIEWED)
+        tool.cells[1].mark(False)
         viewer.reset_view()
         tool.all_in_view_ok()  # the whole image is in view
-        assert tool.cells[1] == af.Cell(af.OK, af.PROPOSED, af.BULK)
+        assert tool.cells[1] == af.Cell(True, af.PROPOSED, af.BULK)
         assert tool.cells[4].ok_by == af.HAND  # already OK: left as it was
 
         tool.folders = [train_folder, test_folder]
@@ -123,7 +123,7 @@ def test_tool_corrects_marks_and_saves(train_folder, test_folder):
         tool.draw_cell(np.array([[2.0, 2], [2, 8], [8, 8], [8, 2]]))
         QApplication.processEvents()
         tool.go(-1)  # saves the test patch
-        assert af.read_cells(test_folder) == {1: af.Cell(af.OK, af.DRAWN, af.HAND)}
+        assert af.read_cells(test_folder) == {1: af.Cell(True, af.DRAWN, af.HAND)}
     finally:
         viewer.close()
 
@@ -178,6 +178,71 @@ def test_delete_mode_drag_deletes_every_cell_passed_over(train_folder):
         viewer.close()
 
 
+def test_delete_keeps_ok_cells_and_undo_gives_a_cell_back_as_it_was(train_folder):
+    from qtpy.QtWidgets import QApplication
+
+    from annocell.app import DELETE, TOGGLE, Annotator
+
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        tool.toggle_mode(TOGGLE)
+        _click(tool, viewer, 1, (5, 5))  # cell 1 OK
+        tool.cells[2].is_macrophage = True  # cell 2: not checked, a macrophage
+        tool.toggle_mode(DELETE)
+        _drag(tool, viewer, [(5, 5), (5, 12), (5, 15)])  # across cells 1 and 2
+        QApplication.processEvents()
+        assert (tool.masks.data == 1).any() and not (tool.masks.data == 2).any()  # the OK cell is kept
+        assert set(tool.cells) == {1, 3}
+        tool.masks.undo()
+        QApplication.processEvents()
+        tool.autosave()  # an undo may leave no paint event: the autosave matches the table to the masks
+        # Back as it was: not checked, still a macrophage; not OK because it gained pixels.
+        assert tool.cells[2] == af.Cell(False, af.PROPOSED, "", True) and tool.cells[1].ok
+        assert af.read_cells(train_folder)[2] == af.Cell(False, af.PROPOSED, "", True)
+    finally:
+        viewer.close()
+
+
+def test_undo_takes_back_ok_marks_and_shift_o_at_once(train_folder):
+    from app_model.types import KeyCode, KeyMod
+    from napari.utils.key_bindings import coerce_keybinding
+    from qtpy.QtWidgets import QApplication
+
+    from annocell.app import TOGGLE, Annotator
+
+    viewer = napari.Viewer(show=False)
+    try:
+        tool = Annotator(viewer, [train_folder], 0)
+        undo_key = coerce_keybinding(KeyMod.CtrlCmd | KeyCode.KeyZ)
+        assert tool.masks.keymap[undo_key] is not type(tool.masks).class_keymap[undo_key]  # ours wins over napari's
+        tool.toggle_mode(TOGGLE)
+        _click(tool, viewer, 1, (5, 5))  # cell 1 OK by hand
+        tool.all_in_view_ok()  # cells 2 and 3 OK in bulk
+        assert all(cell.ok for cell in tool.cells.values())
+        tool.masks.keymap[undo_key](tool.masks)  # Cmd+Z: the whole Shift+O, at once
+        assert tool.cells[1].ok and not tool.cells[2].ok and not tool.cells[3].ok
+        tool.redo()
+        assert tool.cells[2] == tool.cells[3] == af.Cell(True, af.PROPOSED, af.BULK)
+        tool.undo()
+        drawn = tool.draw_cell(np.array([(13, 21), (13, 28), (18, 28), (18, 21)]))  # a new cell: pixels and a row
+        QApplication.processEvents()
+        assert tool.cells[drawn].ok
+        tool.redo()  # a new step drops the steps undone: nothing to redo
+        assert not tool.cells[2].ok
+        tool.undo()  # the outline: its pixels and its row
+        assert drawn not in tool.cells and not (tool.masks.data == drawn).any()
+        tool.undo()  # the click on cell 1
+        assert not any(cell.ok for cell in tool.cells.values())
+        tool.undo()  # nothing left: nothing happens
+        tool.redo()
+        assert tool.cells[1] == af.Cell(True, af.PROPOSED, af.HAND)
+        tool.autosave()
+        assert af.read_cells(train_folder)[1].ok and not af.read_cells(train_folder)[2].ok
+    finally:
+        viewer.close()
+
+
 def test_ok_mode_drag_marks_in_the_direction_of_the_first_cell(train_folder):
     from annocell.app import TOGGLE, Annotator
 
@@ -187,11 +252,11 @@ def test_ok_mode_drag_marks_in_the_direction_of_the_first_cell(train_folder):
         tool.toggle_mode(TOGGLE)
         # From cell 1 (not checked) across cell 2, with several move events over each: both OK, none flipped back.
         _drag(tool, viewer, [(5, 5), (5, 7), (5, 9), (5, 12), (5, 14), (5, 16)])
-        assert tool.cells[1].state == tool.cells[2].state == af.OK and tool.cells[3].state == af.UNREVIEWED
+        assert tool.cells[1].ok and tool.cells[2].ok and not tool.cells[3].ok
         _drag(tool, viewer, [(5, 15), (5, 12), (5, 5)])  # starting on an OK cell: back to not checked
-        assert tool.cells[1].state == tool.cells[2].state == af.UNREVIEWED
+        assert not tool.cells[1].ok and not tool.cells[2].ok
         _drag(tool, viewer, [(11, 25), (15, 5)])  # starting on background: marks OK
-        assert tool.cells[3].state == af.OK
+        assert tool.cells[3].ok
     finally:
         viewer.close()
 
@@ -229,7 +294,7 @@ def test_starts_empty_and_opens_a_folder(train_folder, test_folder, tmp_path):
         tool.toggle_mode(TOGGLE)
         _click(tool, viewer, 1, (5, 5))
         tool.open_folder(test_folder)  # one image folder: the image open so far is saved first
-        assert af.read_cells(train_folder)[1].state == af.OK
+        assert af.read_cells(train_folder)[1].ok
         assert tool.folder == test_folder and tool.test_mode
     finally:
         viewer.close()
@@ -270,7 +335,7 @@ def test_closed_roi_is_read_only(train_folder):
         assert tool.drawing is None
         viewer.reset_view()
         tool.all_in_view_ok()
-        assert all(c.state == af.UNREVIEWED for c in tool.cells.values())
+        assert all(not c.ok for c in tool.cells.values())
         assert tool.save() and not (train_folder / af.MASKS).exists()  # never written
     finally:
         viewer.close()
@@ -377,11 +442,11 @@ def test_round_closed_while_open_turns_read_only(train_folder):
         tool = Annotator(viewer, [train_folder], 0)
         tool.toggle_mode(TOGGLE)
         _click(tool, viewer, 1, (5, 5))  # cell 1 OK
-        assert tool.save() and af.read_cells(train_folder)[1].state == af.OK
+        assert tool.save() and af.read_cells(train_folder)[1].ok
         af.close(train_folder)  # the pipeline closes the round
         _click(tool, viewer, 1, (5, 15))  # cell 2 OK, after the round closed
         assert tool.save()  # nothing written, the annotator can move on
-        assert af.read_cells(train_folder)[2].state == af.UNREVIEWED and af.is_closed(af.read_record(train_folder))
+        assert not af.read_cells(train_folder)[2].ok and af.is_closed(af.read_record(train_folder))
         assert tool.read_only and not tool.masks.editable and tool.mode == NAVIGATE and not tool.dirty
         assert "closed: read-only" in _panel(tool)
     finally:
@@ -409,15 +474,15 @@ def test_failed_save_keeps_the_changes_and_tries_again(train_folder, test_folder
         tool.all_in_view_ok()  # every cell OK and done: only the failed save keeps the image open
         tool.press_done()
         tool.go(1)  # not saved: the image stays open
-        assert tool.folder == train_folder and tool.cells[1].state == af.OK
+        assert tool.folder == train_folder and tool.cells[1].ok
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
         backup = tool.save_backup()  # what closing napari does when the drive is still unreachable
         assert backup == tmp_path / "home" / "AnnoCell unsaved" / "alice_round_02_test_image"
         monkeypatch.setattr(af, "save", save)
-        assert af.read_cells(backup)[1].state == af.OK
+        assert af.read_cells(backup)[1].ok
         tool.autosave()  # the drive is back
         assert not tool.dirty and tool.save_error is None and "Not saved" not in _panel(tool)
-        assert af.read_cells(train_folder)[1].state == af.OK
+        assert af.read_cells(train_folder)[1].ok
     finally:
         viewer.close()
 

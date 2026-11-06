@@ -85,10 +85,10 @@ draw with the space bar to pan (losing the plain drag to pan was worse).
 | Action | How | Effect |
 |---|---|---|
 | Draw a cell | right click (any mode; or left click in draw mode), move around the cell with no button held (the outline follows the mouse, as in the Cellpose GUI); it closes back at the start or with a second click; `Esc` drops it | new cell; it takes the pixels it covers from overlapping cells, whose remainders stay; each outline is a new cell. napari's point-by-point polygon was too slow, and holding the button down was tiring |
-| Delete a cell | delete mode (`D`): click it, or drag over several | cells removed; a drag is one undo step |
+| Delete a cell | delete mode (`D`): click it, or drag over several | cells removed; a drag is one undo step. OK cells are kept (an OK cell is checked): `O` first to take one back to not checked |
 | Fix an outline | delete it (`D`) and draw it again, or napari's brush, eraser, fill, polygon and picker | napari's tools from their **buttons only**: their keys (`P`, `E`, `F`, `L`, `1`–`7`, `M`, `-`, `=`, `[`, `]`, ...) are switched off, since a key pressed by mistake damaged the masks (decided after trying them). Picking a napari tool leaves draw, delete and OK mode; the brush always starts a new cell (after an outline too) |
 | Mark OK | OK mode (`O`): click a cell, or drag over several | the outline is right; a stroke starting on an OK cell takes the cells back to unreviewed (the first cell decides the direction, so passing over a cell twice does not flip it back) |
-| Mark all remaining in view as OK | `Shift+O` or button | every unreviewed cell **entirely** in view becomes OK, recorded as OK **in bulk** (cells cut by the view edge are left; cells already OK keep how they became OK) |
+| Mark all remaining in view as OK | `Shift+O` or button | every unreviewed cell **entirely** in view becomes OK, recorded as OK **in bulk** (cells cut by the view edge are left; cells already OK keep how they became OK); one undo takes them all back |
 | Go to an unreviewed cell | button | centres the view on the nearest unreviewed cell (to finish an image) |
 | Done | button (no key) | the image is finished: recorded only if every cell is OK; otherwise a message says how many cells are still not OK, and nothing is recorded |
 | Leave an image not done | close napari, or Open folder | a question first ("not marked as done: it stays out of training until you press Done"), No by default. No skipping: Image > never goes past an image not done |
@@ -114,7 +114,8 @@ annotation guidelines, so that forced choices are at least consistent, e.g. *not
 not sure about the outline: keep the proposal*.
 
 Saving is automatic (every 3 seconds when something changed, when changing image and when closing napari), so a
-crash loses little; undo / redo as in napari.
+crash loses little. Undo (`Cmd+Z`, `Ctrl+Z` on Windows) and redo (`Cmd+Shift+Z`) take back whole steps, OK marks
+included: an outline, a delete stroke, a brush stroke, an OK stroke, or one `Shift+O` (all its cells at once).
 
 **Network drive.** The folders are on a network drive (fs4), reached through the VPN from home, so a save can fail
 (drive or VPN down). Then everything stays in memory, the panel says "Not saved", the next autosave tries again,
@@ -146,8 +147,10 @@ tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, 
   model's `model.json`; absent in test mode;
 - `masks.tif`: the current masks (uint32 labels). Replaces `<image>_seg.npy` of the Cellpose GUI (a pickle; the
   GUI is no longer used);
-- `cells.csv`: one row per cell: `cell_ID`, `state` (`unreviewed` / `ok`), `origin` (`proposed` / `edited` /
-  `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `ok_by` (`hand` / `bulk`, empty while unreviewed);
+- `cells.csv`: one row per cell: `cell_ID`, `ok` (`True` / `False`: checked, or not yet), `origin` (`proposed` /
+  `edited` / `drawn`; replaces the GUI's `ismanual`, used by training as hand-drawn cells), `ok_by` (`hand` / `bulk`,
+  empty while not checked), `is_macrophage` (`True` / `False`; marked on test images only, to score the models on
+  macrophages);
 - `annotation.json`: written by the pipeline only: annotator, round, `mode` (`train` / `test`), provenance,
   channels, start segmentation, `closed_on` when the round is over, and what AnnoLoop's `finish` adds (`status`,
   `start_score`);
@@ -157,8 +160,8 @@ tool shows, and the tool needs only napari, tifffile and numpy (no spatialdata, 
 
 **One writer per file**: the pipeline writes `annotation.json`, the tool writes `masks.tif`, `cells.csv` and
 `review.json`. Format 1 kept the review in `annotation.json`, so a save and a `finish` or a `close` running at the
-same moment could overwrite each other's fields; format 2 (`format_version`) moved it out. Format-1 folders are not
-read (no real round used them): export them again.
+same moment could overwrite each other's fields; format 2 (`format_version`) moved it out. Format 3 replaced `state` with `ok` (a bool) and added `is_macrophage`.
+Older folders are not read: export them again.
 
 Saves write a temporary file and rename it, so a crash during a save cannot corrupt the masks.
 

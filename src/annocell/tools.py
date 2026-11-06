@@ -8,11 +8,16 @@ under it. Dragging pans, except while an outline is being drawn and in the delet
 Modes (keys; the same key again, or ``Esc``, back to navigating):
 
 - ``N``, draw: a left click starts a new cell;
-- ``D``, delete: a click deletes the cell under it; dragging deletes every cell passed over (one undo);
+- ``D``, delete: a click deletes the cell under it; dragging deletes every cell passed over (one undo). OK cells
+  are kept: ``O`` first takes one back to not checked;
 - ``O``, OK: a click marks the cell OK, or back to unreviewed if it was OK; dragging does the same to every cell
   passed over, in the direction decided by the first one.
 
 ``Shift+O`` marks every unreviewed cell entirely in view OK (``ok_by`` bulk; every other way to OK a cell is by hand).
+
+``Cmd+Z`` (``Ctrl+Z`` on Windows) undoes the last step, ``Cmd+Shift+Z`` redoes it. A step is an outline, a delete, a
+napari brush stroke, an OK stroke or a ``Shift+O``: its pixels (napari's own undo) and the cell rows it changed
+(OK or not, how, macrophage) go back together, so ``Shift+O`` is undone in one go.
 
 ``Tools`` is a part of ``Annotator`` (``class Annotator(Tools)``): its methods use the annotator's state (``masks``,
 ``cells``, ``mode``, ``drawing``, ...) and call back into it (``changed``, ``widget``).
@@ -20,14 +25,46 @@ Modes (keys; the same key again, or ``Esc``, back to navigating):
 
 from __future__ import annotations
 
+from collections import deque
+from copy import copy
+from typing import Any
+
 import numpy as np
 
 from annocell import folder as af
-from annocell.constants import CLOSE_SCREEN_PX, DELETE, DRAW, MIN_CELL_PX, NAVIGATE, TOGGLE
+from annocell.constants import CLOSE_SCREEN_PX, DELETE, DRAW, MACROPHAGE, MIN_CELL_PX, NAVIGATE, TOGGLE
+
+# A step of the tool's undo: whether napari has a pixel step for it, and ``{cell_ID: (row before, row after)}`` (None:
+# no row, the cell was not there).
+Step = tuple[bool, dict[int, tuple[af.Cell | None, af.Cell | None]]]
 
 
 class Tools:
     """Modes, mouse and edits of ``Annotator``."""
+
+    # What these methods use of ``Annotator``, which sets it (see its docstring): declared here so that the editor
+    # (Pylance) and type checkers know it. Annotations only: no value is set here.
+    viewer: Any
+    masks: Any  # the editable napari labels layer
+    cells: dict[int, af.Cell]
+    removed: dict[int, af.Cell]  # the rows of the cells deleted since the image was opened (``_sync_cells``)
+    history: deque[Step]  # the steps to undo, the last one last
+    future: list[Step]  # the steps undone, to redo
+    start: np.ndarray
+    snapshot: np.ndarray
+    mode: str
+    drawing: list | None
+    outline: Any
+    next_id: int
+    read_only: bool
+    test_mode: bool
+    closed: bool
+    is_open: bool
+    widget: Any
+
+    def changed(self) -> None:
+        """Something to save; ``Annotator.changed`` replaces this."""
+        raise NotImplementedError
 
     # Modes
 
@@ -42,7 +79,7 @@ class Tools:
         if mode != NAVIGATE:
             self.masks.mode = "pan_zoom"
             self.viewer.layers.selection.active = self.masks
-        self.masks.cursor = {NAVIGATE: "standard", DRAW: "cross", DELETE: "forbidden", TOGGLE: "pointing"}[mode]
+        self.masks.cursor = {NAVIGATE: "standard", DRAW: "cross", DELETE: "forbidden", TOGGLE: "pointing", MACROPHAGE: "pointing"}[mode]
         self.widget.update_mode()
 
     def toggle_mode(self, mode: str) -> None:
@@ -73,7 +110,9 @@ class Tools:
         elif self.mode == DELETE:
             yield from self._delete_drag(event)
         elif self.mode == TOGGLE:
-            yield from self._ok_drag(event)
+            yield from self._toggle_drag(event)
+        elif self.mode == MACROPHAGE:
+            self._macrophage_at(event)
 
     def start_outline(self, point) -> None:
         self.drawing = [self._inside(point)]
@@ -153,9 +192,9 @@ class Tools:
         return cell
 
     def delete_at(self, point) -> None:
-        """Delete the cell at ``point`` (undoable, like a napari edit)."""
+        """Delete the cell at ``point`` (undoable, like a napari edit); an OK cell is kept (O first, to delete it)."""
         cell = self._cell_at(point)
-        if cell:
+        if cell and not self.cells[cell].ok:
             self.masks.data_setitem(np.nonzero(self.masks.data == cell), 0)
 
     def _delete_drag(self, event):
@@ -168,22 +207,35 @@ class Tools:
                 self.delete_at(self._data_point(event.position))
                 yield
 
-    def _ok_drag(self, event):
+    def _macrophage_at(self, event) -> None:
+        '''Set the cell at ``point`` as a macrophage (only fot test images)'''
+        cell = self._cell_at(self._data_point(event.position))
+        self._set_macrophage(cell, MACROPHAGE)
+
+    def _toggle_drag(self, event):
         """OK mode: the first cell decides the stroke. Not checked (or background): every cell passed over becomes
         OK; OK: every cell passed over goes back to not checked. A toggle per move event would flip a cell back and
         forth while the mouse crosses it; a fixed direction makes repeated events harmless."""
+        before = self._rows()  # the whole stroke is one undo step
         first = self._cell_at(self._data_point(event.position))
-        state = af.UNREVIEWED if first in self.cells and self.cells[first].state == af.OK else af.OK
-        self._set_state(first, state)
+        ok = not (first in self.cells and self.cells[first].ok)
+        self._set_ok(first, ok)
         yield
         while event.type == "mouse_move":
-            self._set_state(self._cell_at(self._data_point(event.position)), state)
+            self._set_ok(self._cell_at(self._data_point(event.position)), ok)
             yield
+        self._remember(before)
 
-    def _set_state(self, cell: int, state: str) -> None:
-        # Review states are not pixels: not in napari's undo history (O again undoes a mark).
-        if cell in self.cells and self.cells[cell].state != state:
-            self.cells[cell].mark(state, af.HAND)
+    def _set_ok(self, cell: int, ok: bool) -> None:
+        if cell in self.cells and self.cells[cell].ok != ok:
+            self.cells[cell].mark(ok, af.HAND)
+            self.changed()
+            
+    def _set_macrophage(self, cell: int, isMacrophage: bool) -> None:
+        if cell in self.cells:
+            before = {cell: copy(self.cells[cell])}
+            self.cells[cell].is_macrophage = not self.cells[cell].is_macrophage
+            self._remember(before)
             self.changed()
 
     def all_in_view_ok(self) -> None:
@@ -194,10 +246,12 @@ class Tools:
         # ``corner_pixels``: the first and last visible pixel of the layer, (y, x), as napari last drew it.
         (y0, x0), (y1, x1) = np.asarray(self.masks.corner_pixels, dtype=int)[:, -2:]
         marked = [c for c in af.ids_inside(self.masks.data, y0, y1 + 1, x0, x1 + 1) if c in self.cells]
-        marked = [c for c in marked if self.cells[c].state == af.UNREVIEWED]
+        marked = [c for c in marked if not self.cells[c].ok]
+        before = {c: copy(self.cells[c]) for c in marked}
         for cell in marked:
-            self.cells[cell].mark(af.OK, af.BULK)
+            self.cells[cell].mark(True, af.BULK)
         if marked:  # nothing to mark is not a change (and does not take Done back)
+            self._remember(before)  # one undo step for them all
             self.changed()
 
     def _cell_at(self, point) -> int:
@@ -208,19 +262,81 @@ class Tools:
 
     def _on_paint(self) -> None:
         """After an outline, a delete, an undo or redo: the cells that gained pixels are OK (by hand), and so are
-        those trimmed to background; cells that only lost pixels to a new cell keep their state."""
+        those trimmed to background; cells that only lost pixels to a new cell keep their state, and a deleted cell
+        brought back by undo is as it was (``_sync_cells``)."""
         if self.closed:
             return
+        before = self._rows()
         data = self.masks.data
         diff = data != self.snapshot  # the pixels this edit changed
         gained = set(np.unique(data[diff]).tolist()) - {0}
         trimmed = set(np.unique(self.snapshot[diff & (data == 0)]).tolist()) - {0}
-        # Deleted cells leave the table, new ones join it, and every origin is recomputed against the start masks.
-        self.cells = af.sync_cells(self.cells, data, self.start)
-        for cell in (gained | trimmed) & self.cells.keys():
-            self.cells[cell].mark(af.OK, af.HAND)
+        back = self._sync_cells()
+        # A cell back from an undo is as it was before its delete, not OK just because it gained pixels.
+        for cell in (gained | trimmed) & (self.cells.keys() - back):
+            self.cells[cell].mark(True, af.HAND)
         self.next_id = max(self.next_id, int(data.max()) + 1)
         self.snapshot = data.copy()
+        self._remember(before, pixels=True)  # napari undoes the pixels, ``undo`` the rows they changed
+        self.changed()
+
+    def _sync_cells(self) -> set[int]:
+        """Match the cell table to the masks (``af.sync_cells``: deleted cells leave it, new ones join it, every
+        origin is recomputed), and remember the deleted ones: a cell that comes back (undo) gets its row back, OK or
+        not, macrophage or not. IDs are never reused (``next_id`` only grows), so an ID that comes back is the same
+        cell. Returns the IDs that came back."""
+        data = self.masks.data
+        present = set(np.unique(data).tolist())
+        self.removed.update({i: cell for i, cell in self.cells.items() if i not in present})
+        cells = af.sync_cells(self.cells, data, self.start)
+        back = cells.keys() & self.removed.keys()
+        for i in back:
+            old = self.removed.pop(i)
+            cells[i] = af.Cell(old.ok, cells[i].origin, old.ok_by, old.is_macrophage)
+        self.cells = cells
+        return back
+
+    # Undo
+
+    def _rows(self) -> dict[int, af.Cell]:
+        """A copy of every row of the cell table, to tell later what a step changed (``_remember``)."""
+        return {i: copy(cell) for i, cell in self.cells.items()}
+
+    def _remember(self, before: dict[int, af.Cell], pixels: bool = False) -> None:
+        """Add a step to undo: ``pixels``, napari added one to its own undo for this step; ``before``, the rows as
+        they were (at least those that may have changed). A new step drops the steps undone (no redo after it)."""
+        rows = {}
+        for i in before.keys() | (self.cells.keys() if pixels else set()):
+            old, new = before.get(i), self.cells.get(i)
+            if old != new:
+                rows[i] = (old, copy(new))
+        if pixels or rows:
+            self.history.append((pixels, rows))
+            self.future.clear()
+
+    def undo(self) -> None:
+        """``Cmd+Z``: take the last step back, its pixels and the cell rows it changed."""
+        self._replay(self.history, self.future, undoing=True)
+
+    def redo(self) -> None:
+        """``Cmd+Shift+Z``: do the last step undone again."""
+        self._replay(self.future, self.history, undoing=False)
+
+    def _replay(self, source, target, undoing: bool) -> None:
+        if self.read_only or not source:
+            return
+        self.cancel_outline()
+        pixels, rows = source.pop()
+        target.append((pixels, rows))
+        if pixels:
+            # napari's own undo: it sends no paint event, so the table is matched to the masks here.
+            (self.masks.undo if undoing else self.masks.redo)()
+            self._sync_cells()
+            self.snapshot = self.masks.data.copy()
+        for i, (old, new) in rows.items():
+            row = old if undoing else new
+            if row is not None and i in self.cells:
+                self.cells[i] = copy(row)
         self.changed()
 
 
